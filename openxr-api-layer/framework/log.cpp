@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "log.h"
 
 namespace {
     constexpr uint32_t k_maxLoggedErrors = 100;
@@ -37,14 +38,54 @@ namespace openxr_api_layer::log {
 
     TraceLoggingActivity<g_traceProvider> g_traceActivity;
 
+    // Global log level (default: Information)
+    LogLevel g_logLevel = LogLevel::Information;
+
+    LogLevel GetLogLevel() {
+        return g_logLevel;
+    }
+
+    void SetLogLevel(LogLevel level) {
+        g_logLevel = level;
+    }
+
+    bool ParseLogLevel(const char* value) {
+        if (!value) return false;
+        // Case-insensitive comparison
+        std::string lower(value);
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+        if (lower == "verbose") { g_logLevel = LogLevel::Verbose; return true; }
+        if (lower == "debug") { g_logLevel = LogLevel::Debug; return true; }
+        if (lower == "information" || lower == "info") { g_logLevel = LogLevel::Information; return true; }
+        if (lower == "warning" || lower == "warn") { g_logLevel = LogLevel::Warning; return true; }
+        if (lower == "error") { g_logLevel = LogLevel::Error; return true; }
+        if (lower == "fatal") { g_logLevel = LogLevel::Fatal; return true; }
+        return false;
+    }
+
     namespace {
 
         // Utility logging function.
-        void InternalLog(const char* fmt, va_list va) {
+        void InternalLog(LogLevel level, const char* fmt, va_list va) {
             const std::time_t now = std::time(nullptr);
 
-            char buf[1024];
-            size_t offset = std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %z: ", std::localtime(&now));
+            // Level prefix
+            const char* levelStr = "";
+            switch (level) {
+                case LogLevel::Verbose:     levelStr = "[V] "; break;
+                case LogLevel::Debug:       levelStr = "[D] "; break;
+                case LogLevel::Information: levelStr = "[I] "; break;
+                case LogLevel::Warning:     levelStr = "[W] "; break;
+                case LogLevel::Error:       levelStr = "[E] "; break;
+                case LogLevel::Fatal:       levelStr = "[F] "; break;
+                default: levelStr = ""; break;
+            }
+
+            char buf[2048];
+            size_t offset = std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %z ", std::localtime(&now));
+            strcat_s(buf + offset, sizeof(buf) - offset, levelStr);
+            offset += strlen(levelStr);
             vsnprintf_s(buf + offset, sizeof(buf) - offset, _TRUNCATE, fmt, va);
             OutputDebugStringA(buf);
             if (logStream.is_open()) {
@@ -57,7 +98,7 @@ namespace openxr_api_layer::log {
     void Log(const char* fmt, ...) {
         va_list va;
         va_start(va, fmt);
-        InternalLog(fmt, va);
+        InternalLog(LogLevel::Information, fmt, va);
         va_end(va);
     }
 
@@ -65,7 +106,7 @@ namespace openxr_api_layer::log {
         if (g_globalErrorCount++ < k_maxLoggedErrors) {
             va_list va;
             va_start(va, fmt);
-            InternalLog(fmt, va);
+            InternalLog(LogLevel::Error, fmt, va);
             va_end(va);
             if (g_globalErrorCount == k_maxLoggedErrors) {
                 Log("Maximum number of errors logged. Going silent.");
@@ -77,7 +118,7 @@ namespace openxr_api_layer::log {
 #ifdef _DEBUG
         va_list va;
         va_start(va, fmt);
-        InternalLog(fmt, va);
+        InternalLog(LogLevel::Debug, fmt, va);
         va_end(va);
 #endif
     }

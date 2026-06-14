@@ -105,7 +105,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\OpenXR-MixedReality\shared\ext;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -170,7 +170,7 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\OpenXR-MixedReality\shared\ext;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -237,7 +237,7 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\OpenXR-MixedReality\shared\ext;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -306,7 +306,7 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(IntDir);$(ProjectDir);$(ProjectDir)\framework;$(SolutionDir)\external\fmt\include;$(SolutionDir)\external\OpenXR-SDK\include;$(SolutionDir)\external\OpenXR-SDK\src\common;$(SolutionDir)\external\OpenXR-MixedReality\Shared\XrUtility;$(SolutionDir)\external\OpenXR-MixedReality\Shared\SampleShared;$(SolutionDir)\external\OpenXR-MixedReality\shared\ext;$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -374,6 +374,9 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
     <ClInclude Include="pch.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="views.h" />
+    <ClInclude Include="compositor.h" />
+    <ClInclude Include="d3d11_compositor.h" />
+    <ClInclude Include="d3d12_compositor.h" />
     <ClInclude Include="utils\general.h" />
     <ClInclude Include="utils\graphics.h" />
     <ClInclude Include="utils\inputs.h" />
@@ -390,6 +393,8 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
     <ClCompile Include="framework\entry.cpp" />
     <ClCompile Include="framework\log.cpp" />
     <ClCompile Include="layer.cpp" />
+    <ClCompile Include="d3d11_compositor.cpp" />
+    <ClCompile Include="d3d12_compositor.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
@@ -426,15 +431,16 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
     </None>
   </ItemGroup>
   <ItemGroup>
+    <!-- D3D12 shaders (SM 6.0) -->
     <FxCompile Include="ProjectionPS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">5.0</ShaderModel>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">5.0</ShaderModel>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">5.0</ShaderModel>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">6.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">6.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.0</ShaderModel>
       <VariableName Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">g_%(Filename)</VariableName>
       <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(IntDir)%(Filename).h</HeaderFileOutput>
       <ObjectFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -450,6 +456,15 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
       <VariableName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">g_%(Filename)</VariableName>
       <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(IntDir)%(Filename).h</HeaderFileOutput>
       <ObjectFileOutput Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+      </ObjectFileOutput>
+    </FxCompile>
+    <!-- D3D11 shaders (SM 5.0) - wrapper files that include the originals -->
+    <FxCompile Include="ProjectionPS11.hlsl">
+      <ShaderType>Pixel</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <VariableName>g_ProjectionPS11</VariableName>
+      <HeaderFileOutput>$(IntDir)ProjectionPS11.h</HeaderFileOutput>
+      <ObjectFileOutput>
       </ObjectFileOutput>
     </FxCompile>
     <FxCompile Include="ProjectionVS.hlsl">
@@ -457,10 +472,10 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Vertex</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Vertex</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">5.0</ShaderModel>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">5.0</ShaderModel>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">5.0</ShaderModel>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">6.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">6.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.0</ShaderModel>
       <VariableName Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">g_%(Filename)</VariableName>
       <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(IntDir)%(Filename).h</HeaderFileOutput>
       <ObjectFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -478,15 +493,24 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
       <ObjectFileOutput Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </ObjectFileOutput>
     </FxCompile>
+    <!-- D3D11 SM 5.0 vertex shader -->
+    <FxCompile Include="ProjectionVS11.hlsl">
+      <ShaderType>Vertex</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <VariableName>g_ProjectionVS11</VariableName>
+      <HeaderFileOutput>$(IntDir)ProjectionVS11.h</HeaderFileOutput>
+      <ObjectFileOutput>
+      </ObjectFileOutput>
+    </FxCompile>
     <FxCompile Include="SharpeningCS.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.0</ShaderModel>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">6.0</ShaderModel>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">6.0</ShaderModel>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.0</ShaderModel>
       <VariableName Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">g_%(Filename)</VariableName>
       <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(IntDir)%(Filename).h</HeaderFileOutput>
       <ObjectFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -511,6 +535,17 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">CAS_SAMPLE_FP16=0;CAS_SAMPLE_SHARPEN_ONLY=1;WIDTH=64;HEIGHT=1;DEPTH=1</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">CAS_SAMPLE_FP16=0;CAS_SAMPLE_SHARPEN_ONLY=1;WIDTH=64;HEIGHT=1;DEPTH=1</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">CAS_SAMPLE_FP16=0;CAS_SAMPLE_SHARPEN_ONLY=1;WIDTH=64;HEIGHT=1;DEPTH=1</PreprocessorDefinitions>
+    </FxCompile>
+    <!-- D3D11 SM 5.0 compute shader -->
+    <FxCompile Include="SharpeningCS11.hlsl">
+      <ShaderType>Compute</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <VariableName>g_SharpeningCS11</VariableName>
+      <HeaderFileOutput>$(IntDir)SharpeningCS11.h</HeaderFileOutput>
+      <ObjectFileOutput>
+      </ObjectFileOutput>
+      <AdditionalIncludeDirectories>$(SolutionDir)\external\FidelityFX-CAS\ffx-cas</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>CAS_SAMPLE_FP16=0;CAS_SAMPLE_SHARPEN_ONLY=1;WIDTH=64;HEIGHT=1;DEPTH=1</PreprocessorDefinitions>
     </FxCompile>
   </ItemGroup>
   <ItemGroup>

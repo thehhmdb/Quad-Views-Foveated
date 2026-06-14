@@ -70,6 +70,8 @@ using Microsoft::WRL::ComPtr;
 #endif
 #ifdef XR_USE_GRAPHICS_API_D3D12
 #include <d3d12.h>
+#include <d3dx12.h>
+#include <d3d12shader.h>
 #endif
 
 // OpenXR + Windows-specific definitions.

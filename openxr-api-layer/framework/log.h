@@ -42,19 +42,86 @@ namespace openxr_api_layer::log {
 #define TLXArg TLPArg
 #endif
 
-    // General logging function.
+    // Log levels - messages are logged if their level >= current log level
+    enum class LogLevel {
+        Verbose = 0,
+        Debug = 1,
+        Information = 2,
+        Warning = 3,
+        Error = 4,
+        Fatal = 5,
+    };
+
+    // Forward declaration of Log (defined below) - needed by template functions
+    void Log(const char* fmt, ...);
+
+    // Get/set the current log level (default: Information)
+    LogLevel GetLogLevel();
+    void SetLogLevel(LogLevel level);
+
+    // Parse log level from string (used by settings parser)
+    // Returns true if the string is a valid log level name
+    bool ParseLogLevel(const char* value);
+
+    // Level-gated logging functions.
+    // The format string is only evaluated (via fmt::format) if the level is enabled,
+    // avoiding allocation overhead for filtered messages.
+    template<typename... Args>
+    inline void LogVerbose(const char* fmt, const Args&... args) {
+        if (GetLogLevel() <= LogLevel::Verbose) {
+            Log(fmt::format(fmt, args...).c_str());
+        }
+    }
+
+    template<typename... Args>
+    inline void LogDebug(const char* fmt, const Args&... args) {
+        if (GetLogLevel() <= LogLevel::Debug) {
+            Log(fmt::format(fmt, args...).c_str());
+        }
+    }
+
+    template<typename... Args>
+    inline void LogInformation(const char* fmt, const Args&... args) {
+        if (GetLogLevel() <= LogLevel::Information) {
+            Log(fmt::format(fmt, args...).c_str());
+        }
+    }
+
+    template<typename... Args>
+    inline void LogWarning(const char* fmt, const Args&... args) {
+        if (GetLogLevel() <= LogLevel::Warning) {
+            Log(fmt::format(fmt, args...).c_str());
+        }
+    }
+
+    template<typename... Args>
+    inline void LogError(const char* fmt, const Args&... args) {
+        if (GetLogLevel() <= LogLevel::Error) {
+            Log(fmt::format(fmt, args...).c_str());
+        }
+    }
+
+    template<typename... Args>
+    inline void LogFatal(const char* fmt, const Args&... args) {
+        if (GetLogLevel() <= LogLevel::Fatal) {
+            Log(fmt::format(fmt, args...).c_str());
+        }
+    }
+
+    // Legacy logging functions (kept for backward compatibility).
+    // Log() maps to Information level.
     void Log(const char* fmt, ...);
     static inline void Log(const std::string_view& str) {
         Log(str.data());
     }
 
-    // Debug logging function. Can make things very slow (only enabled on Debug builds).
+    // DebugLog() - compile-gated to _DEBUG builds, maps to Debug level.
     void DebugLog(const char* fmt, ...);
     static inline void DebugLog(const std::string_view& str) {
         Log(str.data());
     }
 
-    // Error logging function. Goes silent after too many errors.
+    // ErrorLog() - rate-limited, maps to Error level.
     void ErrorLog(const char* fmt, ...);
     static inline void ErrorLog(const std::string_view& str) {
         Log(str.data());
