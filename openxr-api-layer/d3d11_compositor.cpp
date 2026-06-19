@@ -54,6 +54,8 @@ namespace openxr_api_layer {
         alignas(4) bool ignoreAlpha;
         alignas(4) bool isUnpremultipliedAlpha;
         alignas(4) bool debugFocusView;
+        alignas(4) float sharpenFocusView;
+        alignas(4) float _padding[2]; // Pad to 32 bytes (multiple of 16 for D3D11 constant buffer)
     };
 
         struct SharpeningCSConstants {
@@ -65,7 +67,7 @@ namespace openxr_api_layer {
     D3D11Compositor::D3D11Compositor(ID3D11Device* device, OpenXrApi* openXrApi)
         : m_device(device)
         , m_openXrApi(openXrApi) {
-        m_device->AddRef();
+        // ComPtr's initializing constructor already AddRefs the device; no explicit AddRef needed.
     }
 
     bool D3D11Compositor::isInitialized() const {
@@ -130,7 +132,8 @@ namespace openxr_api_layer {
         }
         {
             D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = (UINT)std::max((size_t)16, sizeof(ProjectionPSConstants));
+            // D3D11 requires ByteWidth to be a multiple of 16.
+            desc.ByteWidth = (UINT)(((sizeof(ProjectionPSConstants) + 15) / 16) * 16);
             desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             desc.Usage = D3D11_USAGE_DYNAMIC;
             desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -218,7 +221,16 @@ namespace openxr_api_layer {
             // With a shared array swapchain (arraySize=2), acquire once per frame on view 0, release on view 1.
             if (params.viewIndex == 0) {
                 // Release previous swapchain image first (if any) to avoid call order errors.
-                m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr);
+                // The previous image may not have been acquired yet (first frame), in which case
+                // the runtime returns an error that we can safely ignore.
+                {
+                    const XrResult releaseResult =
+                        m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr);
+                    if (XR_FAILED(releaseResult)) {
+                        LogDebug("D3D11: xrReleaseSwapchainImage (full FOV, pre-acquire) failed: {}\n",
+                                 xr::ToCString(releaseResult));
+                    }
+                }
 
                 CHECK_XRCMD(m_openXrApi->OpenXrApi::xrAcquireSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr, &acquiredImageIndex));
                 XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
@@ -413,6 +425,7 @@ namespace openxr_api_layer {
             drawing.ignoreAlpha = ~(params.layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
             drawing.isUnpremultipliedAlpha = params.layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
             drawing.debugFocusView = params.debugFocusView;
+            drawing.sharpenFocusView = params.sharpenFocusView;
             {
                 D3D11_MAPPED_SUBRESOURCE mappedResources;
                 CHECK_HRCMD(context->Map(m_projectionPSConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));
@@ -463,13 +476,18 @@ namespace openxr_api_layer {
         // Release full FOV swapchain image on view 1 only (shared array swapchain)
         // Call base class virtual method directly to bypass layer's deferred release quirk
         if (params.viewIndex == xr::StereoView::Right) {
-            CHECK_XRCMD(m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr));
+            const XrResult releaseResult =
+                m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr);
+            if (XR_FAILED(releaseResult)) {
+                LogWarning("D3D11: xrReleaseSwapchainImage (full FOV) failed: {}\n", xr::ToCString(releaseResult));
+            }
         }
 
         return destinationImage;
     }
 
     void D3D11Compositor::destroy() {
+        // Idempotent: safe to call multiple times (ComPtr::Reset() is a no-op on already-null pointers).
         m_swapchainStates.clear();
         m_linearClampSampler.Reset();
         m_noDepthRasterizer.Reset();

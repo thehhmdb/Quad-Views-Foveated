@@ -44,7 +44,11 @@ namespace openxr_api_layer {
     class D3D11Compositor : public ICompositor {
     public:
         D3D11Compositor(ID3D11Device* device, OpenXrApi* openXrApi);
-        ~D3D11Compositor() override = default;
+        // Call destroy() in the destructor so resources are released even if destroy() was not
+        // called explicitly (e.g. due to an exception). destroy() is idempotent.
+        ~D3D11Compositor() override {
+            destroy();
+        }
 
         bool initialize(int32_t swapchainFormat) override;
         void* compositeView(const CompositorParams& params,
@@ -54,6 +58,12 @@ namespace openxr_api_layer {
                             const XrCompositionLayerProjectionView& focusView) override;
         void destroy() override;
         bool isInitialized() const override;
+
+        // Evict the cached graphics state for a swapchain. Must be called by the layer when a
+        // swapchain is destroyed, to avoid holding dangling raw texture pointers.
+        void evictSwapchainState(XrSwapchain handle) {
+            m_swapchainStates.erase(handle);
+        }
 
     private:
         void populateSwapchainImagesCache(D3D11SwapchainGraphicsState& state, XrSwapchain swapchain, bool isFullFov);

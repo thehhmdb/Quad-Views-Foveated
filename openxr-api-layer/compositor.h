@@ -88,6 +88,10 @@ namespace openxr_api_layer {
 
         // Check if composition resources have been initialized.
         virtual bool isInitialized() const = 0;
+
+        // Evict the cached graphics state for a swapchain. The layer must call this when a
+        // swapchain is destroyed so the compositor does not hold dangling raw texture pointers.
+        virtual void evictSwapchainState(XrSwapchain handle) = 0;
     };
 
     // Factory function to create the appropriate compositor for the detected graphics API.

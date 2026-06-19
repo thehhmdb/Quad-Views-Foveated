@@ -54,6 +54,8 @@ namespace openxr_api_layer {
         alignas(4) bool ignoreAlpha;
         alignas(4) bool isUnpremultipliedAlpha;
         alignas(4) bool debugFocusView;
+        alignas(4) float sharpenFocusView;
+        alignas(4) float _padding[2]; // Match D3D11 struct layout
     };
 
     struct SharpeningCSConstants {
@@ -61,14 +63,19 @@ namespace openxr_api_layer {
         alignas(4) uint32_t Const1[4];
     };
 
+    // Format used for the sharpened (CAS output) texture.
+    // R32G32B32A32_FLOAT matches the CAS shader's RWTexture2D<float4> declaration.
+    // R16G16B16A16_FLOAT caused GPU device-removed crashes on some drivers when the CAS
+    // shader writes float4 values that exceed the 16-bit range (HDR content).
+    constexpr DXGI_FORMAT kSharpenedFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+
     } // end anonymous namespace
 
     D3D12Compositor::D3D12Compositor(ID3D12Device* device, ID3D12CommandQueue* queue, OpenXrApi* openXrApi)
         : m_device(device)
         , m_queue(queue)
         , m_openXrApi(openXrApi) {
-        m_device->AddRef();
-        m_queue->AddRef();
+        // ComPtr's initializing constructor already AddRefs the device/queue; no explicit AddRef needed.
     }
 
     bool D3D12Compositor::isInitialized() const {
@@ -409,11 +416,13 @@ namespace openxr_api_layer {
             LogDebug("  sourceFocusImage={:p}, lastReleasedIndex={}\n",
                 static_cast<void*>(sourceFocusImage), focusSwapchain.lastReleasedIndex);
 
-            // Acquire/release full FOV swapchain image
+            // Acquire/release full FOV swapchain image.
             // Call base class virtual method directly to bypass layer's deferred release quirk,
             // because the full FOV swapchain is not tracked in m_swapchains.
             if (viewIndex == 0) {
                 // Release previous swapchain image first (if any) to avoid call order errors.
+                // The previous image may not have been acquired yet (first frame), in which case
+                // the runtime returns XR_ERROR_CALL_ORDER_INVALID — this is expected and harmless.
                 m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr);
 
                 uint32_t acquiredImageIndex;
@@ -445,7 +454,14 @@ namespace openxr_api_layer {
             }
         }
 
-        // Reset command allocator and create command list
+        // Reset command allocator and create a fresh command list for this eye.
+        //
+        // We intentionally create a new ID3D12GraphicsCommandList every frame rather than caching
+        // and Reset()-ing one. A cached list that ever fails Close() (e.g. due to an invalid
+        // recorded command) is left in the open/recording state, after which Reset() permanently
+        // returns E_INVALIDARG — the compositor can never recover and every subsequent frame is
+        // blank. A fresh list per frame is slightly more expensive but is self-healing: each frame
+        // starts from a known-good, implicitly-opened list. See quad-views-improvement-plan §4.2.
         CHECK_HRCMD(m_compositionAllocator[viewIndex]->Reset());
         ComPtr<ID3D12GraphicsCommandList> cmdList;
         CHECK_HRCMD(device->CreateCommandList(0,
@@ -490,7 +506,15 @@ namespace openxr_api_layer {
                                                             IID_PPV_ARGS(state.flatImage[startSlot + viewIndex].ReleaseAndGetAddressOf())));
             }
 
-            // Barriers: source RT->COPY_SOURCE, dest PSR->COPY_DEST
+            // Barriers: source RT->COPY_SOURCE, dest PSR->COPY_DEST.
+            //
+            // The source is the application's swapchain image, which the app leaves in the
+            // RENDER_TARGET state after drawing. We transition RENDER_TARGET -> COPY_SOURCE here
+            // and restore to RENDER_TARGET after the copy. This matches the proven-working original
+            // behavior. (The improvement plan §4.1 suggested transitioning from COMMON based on the
+            // OpenXR spec, but SteamVR's D3D11-on-D3D12 runtime does not hand over images in COMMON
+            // state, so a COMMON -> COPY_SOURCE barrier is an invalid transition that causes
+            // cmdList->Close() to return E_INVALIDARG and blanks the headset.)
             D3D12_RESOURCE_BARRIER barriers[2];
             barriers[0] = CD3DX12_RESOURCE_BARRIER::Transition(image,
                                                                D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -521,10 +545,10 @@ namespace openxr_api_layer {
 
             cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, &srcBox);
 
-            // Restore: source COPY_SOURCE->PSR, dest COPY_DEST->PSR
+            // Restore: source COPY_SOURCE->RENDER_TARGET, dest COPY_DEST->PSR
             barriers[0] = CD3DX12_RESOURCE_BARRIER::Transition(image,
                                                                 D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                                                                D3D12_RESOURCE_STATE_RENDER_TARGET);
             barriers[1] = CD3DX12_RESOURCE_BARRIER::Transition(state.flatImage[startSlot + viewIndex].Get(),
                                                                 D3D12_RESOURCE_STATE_COPY_DEST,
                                                                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -546,7 +570,7 @@ namespace openxr_api_layer {
                 focusState.sharpenedImage[viewIndex]->GetDesc().Height !=
                     (UINT64)focusView.subImage.imageRect.extent.height ||
                 focusState.sharpenedImage[viewIndex]->GetDesc().Format !=
-                    DXGI_FORMAT_R32G32B32A32_FLOAT) {
+                    kSharpenedFormat) {
                 isSharpenedImageNew = true;
                 D3D12_HEAP_PROPERTIES heapProps{};
                 heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -559,7 +583,9 @@ namespace openxr_api_layer {
                 desc.Height = focusView.subImage.imageRect.extent.height;
                 desc.DepthOrArraySize = 1;
                 desc.MipLevels = 1;
-                desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                // Match the D3D11 compositor's R16G16B16A16_FLOAT to halve memory/bandwidth vs
+                // R32G32B32A32_FLOAT while preserving plenty of precision for a sharpened HDR image.
+                desc.Format = kSharpenedFormat;
                 desc.SampleDesc.Count = 1;
                 desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
                 desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -602,12 +628,15 @@ namespace openxr_api_layer {
 
                 D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
                 srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+                // Specify the format explicitly. The flat focus image is created with the
+                // swapchain format, so use it here instead of relying on DXGI_FORMAT_UNKNOWN
+                // (which depends on the runtime inferring the format and may not work on all drivers).
+                srvDesc.Format = (DXGI_FORMAT)focusSwapchain.createInfo.format;
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                 srvDesc.Texture2D.MipLevels = 1;
 
                 D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-                uavDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                uavDesc.Format = kSharpenedFormat;
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
                 CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[heapIndex]->GetCPUDescriptorHandleForHeapStart());
@@ -696,6 +725,7 @@ namespace openxr_api_layer {
         drawing.ignoreAlpha = ~(params.layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
         drawing.isUnpremultipliedAlpha = params.layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
         drawing.debugFocusView = params.debugFocusView;
+        drawing.sharpenFocusView = params.sharpenFocusView;
         {
             void* constData;
             D3D12_RANGE range = {0, 0};
@@ -766,12 +796,14 @@ namespace openxr_api_layer {
             const uint32_t heapIndex = (m_cbvSrvHeapFrameIndex + viewIndex) % xr::StereoView::Count;
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srvDesc.Texture2D.MipLevels = 1;
 
             CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[heapIndex]->GetCPUDescriptorHandleForHeapStart());
             srvHandle.Offset(srvBase * incrementSize);
+            // Flat images are created with the swapchain format; specify it explicitly instead
+            // of DXGI_FORMAT_UNKNOWN so the format does not depend on driver inference.
+            srvDesc.Format = (DXGI_FORMAT)stereoSwapchain.createInfo.format;
             if (params.useQuadViews && stereoState.flatImage[viewIndex]) {
                 stereoTex = stereoState.flatImage[viewIndex].Get();
                 device->CreateShaderResourceView(stereoTex, &srvDesc, srvHandle);
@@ -783,10 +815,15 @@ namespace openxr_api_layer {
             srvHandle.Offset(incrementSize);
             if (params.sharpenFocusView && focusState.sharpenedImage[viewIndex]) {
                 focusTex = focusState.sharpenedImage[viewIndex].Get();
+                // The sharpened image uses kSharpenedFormat, not the swapchain format.
+                srvDesc.Format = kSharpenedFormat;
             } else if (params.useQuadViews) {
                 focusTex = focusState.flatImage[xr::StereoView::Count + viewIndex].Get();
+                srvDesc.Format = (DXGI_FORMAT)focusSwapchain.createInfo.format;
             } else {
                 focusTex = m_blankTexture.Get();
+                // The blank texture is created as B8G8R8A8_UNORM (see initialize()).
+                srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
             }
             device->CreateShaderResourceView(focusTex, &srvDesc, srvHandle);
         }
@@ -850,13 +887,18 @@ namespace openxr_api_layer {
             LogDebug("  D3D12 composition complete (fence={})\n", m_fenceValue);
 
             // Call base class virtual method directly to bypass layer's deferred release quirk
-            CHECK_XRCMD(m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr));
+            const XrResult releaseResult =
+                m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr);
+            if (XR_FAILED(releaseResult)) {
+                LogWarning("D3D12: xrReleaseSwapchainImage (full FOV) failed: {}\n", xr::ToCString(releaseResult));
+            }
         }
 
         return destinationImage;
     }
 
     void D3D12Compositor::destroy() {
+        // Idempotent: safe to call multiple times (ComPtr::Reset() is a no-op on already-null pointers).
         m_swapchainStates.clear();
         m_cbvSrvHeap[0].Reset();
         m_cbvSrvHeap[1].Reset();

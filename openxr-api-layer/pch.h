@@ -30,6 +30,7 @@
 // Standard library.
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdarg>
 #include <ctime>
 #include <deque>

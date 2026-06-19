@@ -711,6 +711,12 @@ namespace openxr_api_layer {
 
             if (XR_SUCCEEDED(result)) {
                 if (isSessionHandled(session)) {
+                    // Hold the frame mutex while tearing down the compositor. Turbo mode's async
+                    // wait thread may still be touching compositor state (m_swapchainStates);
+                    // locking here guarantees it has finished (the async wait above only joins
+                    // the xrWaitFrame, not necessarily the compositor access in xrEndFrame).
+                    std::unique_lock frameLock(m_frameMutex);
+
                     // Destroy compositor (cleans up all composition resources)
                     if (m_compositor) {
                         m_compositor->destroy();
@@ -1142,6 +1148,12 @@ namespace openxr_api_layer {
                         OpenXrApi::xrDestroySwapchain(entry.fullFovSwapchain);
                     }
                     m_swapchains.erase(it);
+                }
+
+                // Evict the compositor's cached graphics state for this swapchain so we do not
+                // hold dangling raw texture pointers after the runtime freed the swapchain images.
+                if (m_compositor) {
+                    m_compositor->evictSwapchainState(swapchain);
                 }
             }
 
@@ -2120,7 +2132,13 @@ namespace openxr_api_layer {
             eyeGazeInfo.time = time;
 
             XrEyeGazesFB eyeGaze{XR_TYPE_EYE_GAZES_FB};
-            CHECK_XRCMD(OpenXrApi::xrGetEyeGazesFB(m_eyeTrackerFB, &eyeGazeInfo, &eyeGaze));
+            // Do not abort on eye tracking failure: degrade gracefully and let the gaze cache
+            // (in getEyeGaze) smooth over transient dropouts.
+            const XrResult gazeResult = OpenXrApi::xrGetEyeGazesFB(m_eyeTrackerFB, &eyeGazeInfo, &eyeGaze);
+            if (XR_FAILED(gazeResult)) {
+                LogWarning("xrGetEyeGazesFB failed: {}\n", xr::ToCString(gazeResult));
+                return false;
+            }
             TraceLoggingWrite(g_traceProvider,
                               "EyeTrackerFB",
                               TLArg(!!eyeGaze.gaze[xr::StereoView::Left].isValid, "LeftValid"),
@@ -2132,8 +2150,8 @@ namespace openxr_api_layer {
                 return false;
             }
 
-            if (!(eyeGaze.gaze[xr::StereoView::Left].gazeConfidence > 0.5f &&
-                  eyeGaze.gaze[xr::StereoView::Right].gazeConfidence > 0.5f)) {
+            if (!(eyeGaze.gaze[xr::StereoView::Left].gazeConfidence > m_eyeTrackingConfidenceThreshold &&
+                  eyeGaze.gaze[xr::StereoView::Right].gazeConfidence > m_eyeTrackingConfidenceThreshold)) {
                 return false;
             }
 
@@ -2186,9 +2204,10 @@ namespace openxr_api_layer {
         }
 
         bool getEyeGaze(XrTime time, bool getStateOnly, XrVector3f& unitVector) {
-            // Clear the cache.
+            // Clear the cache once the configured timeout has elapsed since the last good sample.
             const auto now = std::chrono::steady_clock::now();
-            if ((now - m_lastGoodEyeTrackingData).count() >= 600'000'000) {
+            if ((now - m_lastGoodEyeTrackingData).count() >=
+                static_cast<int64_t>(m_eyeGazeCacheTimeoutMs) * 1'000'000) {
                 m_lastGoodEyeGaze.reset();
             }
 
@@ -2586,9 +2605,14 @@ namespace openxr_api_layer {
 
                 // Toggle active section.
                 if (line[0] == '[' && line[line.size() - 1] == ']') {
-                    if (line.substr(1, 4) == "app:") {
+                    // Guard against malformed/short section headers (e.g. "[]" or "[a]").
+                    if (line.size() < 3) {
+                        LogWarning("L%u: Malformed section header (too short)\n", lineNumber);
+                        return active;
+                    }
+                    if (line.size() >= 6 && line.substr(1, 4) == "app:") {
                         return GetApplicationName().find(line.substr(5, line.size() - 6)) != std::string::npos;
-                    } else if (line.substr(1, 4) == "exe:") {
+                    } else if (line.size() >= 6 && line.substr(1, 4) == "exe:") {
                         return GetApplicationExecutableName().find(line.substr(5, line.size() - 6)) !=
                                std::string::npos;
                     } else {
@@ -2609,22 +2633,50 @@ namespace openxr_api_layer {
 
                     bool parsed = false;
                     if (name == "peripheral_multiplier") {
-                        m_peripheralPixelDensity = std::max(0.1f, std::stof(value));
+                        const float v = std::stof(value);
+                        if (v < 0.1f) {
+                            LogWarning("L%u: peripheral_multiplier {} below minimum 0.1, clamped\n", lineNumber, v);
+                        }
+                        m_peripheralPixelDensity = std::max(0.1f, v);
                         parsed = true;
                     } else if (name == "focus_multiplier") {
-                        m_focusPixelDensity = std::max(0.1f, std::stof(value));
+                        const float v = std::stof(value);
+                        if (v < 0.1f) {
+                            LogWarning("L%u: focus_multiplier {} below minimum 0.1, clamped\n", lineNumber, v);
+                        }
+                        m_focusPixelDensity = std::max(0.1f, v);
                         parsed = true;
                     } else if (name == "horizontal_fixed_section") {
-                        m_horizontalFovSection[0] = std::clamp(std::stof(value), 0.1f, 0.9f);
+                        const float v = std::stof(value);
+                        m_horizontalFovSection[0] = std::clamp(v, 0.1f, 0.9f);
+                        if (m_horizontalFovSection[0] != v) {
+                            LogWarning("L%u: horizontal_fixed_section {} out of [0.1, 0.9], clamped to {}\n",
+                                       lineNumber, v, m_horizontalFovSection[0]);
+                        }
                         parsed = true;
                     } else if (name == "vertical_fixed_section") {
-                        m_verticalFovSection[0] = std::clamp(std::stof(value), 0.1f, 0.9f);
+                        const float v = std::stof(value);
+                        m_verticalFovSection[0] = std::clamp(v, 0.1f, 0.9f);
+                        if (m_verticalFovSection[0] != v) {
+                            LogWarning("L%u: vertical_fixed_section {} out of [0.1, 0.9], clamped to {}\n",
+                                       lineNumber, v, m_verticalFovSection[0]);
+                        }
                         parsed = true;
                     } else if (name == "horizontal_focus_section") {
-                        m_horizontalFovSection[1] = std::clamp(std::stof(value), 0.1f, 0.9f);
+                        const float v = std::stof(value);
+                        m_horizontalFovSection[1] = std::clamp(v, 0.1f, 0.9f);
+                        if (m_horizontalFovSection[1] != v) {
+                            LogWarning("L%u: horizontal_focus_section {} out of [0.1, 0.9], clamped to {}\n",
+                                       lineNumber, v, m_horizontalFovSection[1]);
+                        }
                         parsed = true;
                     } else if (name == "vertical_focus_section") {
-                        m_verticalFovSection[1] = std::clamp(std::stof(value), 0.1f, 0.9f);
+                        const float v = std::stof(value);
+                        m_verticalFovSection[1] = std::clamp(v, 0.1f, 0.9f);
+                        if (m_verticalFovSection[1] != v) {
+                            LogWarning("L%u: vertical_focus_section {} out of [0.1, 0.9], clamped to {}\n",
+                                       lineNumber, v, m_verticalFovSection[1]);
+                        }
                         parsed = true;
                     } else if (name == "horizontal_fixed_offset") {
                         m_horizontalFixedOffset = std::clamp(std::stof(value), -0.5f, 0.5f);
@@ -2686,6 +2738,12 @@ namespace openxr_api_layer {
                     } else if (name == "debug_keys") {
                         m_debugKeys = std::stoi(value);
                         parsed = true;
+                    } else if (name == "eye_tracking_confidence_threshold") {
+                        m_eyeTrackingConfidenceThreshold = std::clamp(std::stof(value), 0.f, 1.f);
+                        parsed = true;
+                    } else if (name == "eye_gaze_cache_timeout_ms") {
+                        m_eyeGazeCacheTimeoutMs = std::stoul(value);
+                        parsed = true;
                     } else if (name == "log_level") {
                         if (!log::ParseLogLevel(value.c_str())) {
                             LogWarning("  Invalid log_level '{}', using default (Information).", value);
@@ -2701,8 +2759,10 @@ namespace openxr_api_layer {
                 } else {
                     LogWarning("L%u: Improperly formatted option\n", lineNumber);
                 }
+            } catch (const std::exception& e) {
+                LogWarning("L%u: Parsing error: {}\n", lineNumber, e.what());
             } catch (...) {
-                LogWarning("L%u: Parsing error\n", lineNumber);
+                LogWarning("L%u: Parsing error (unknown exception)\n", lineNumber);
             }
 
             return active;
@@ -2804,9 +2864,11 @@ namespace openxr_api_layer {
         std::future<void> m_asyncWaitPromise;
         XrTime m_lastPredictedDisplayTime{0};
         XrTime m_lastPredictedDisplayPeriod{0};
-        bool m_lastShouldRender{true};
-        bool m_asyncWaitPolled{false};
-        bool m_asyncWaitCompleted{false};
+        // These flags are written by the turbo mode async wait thread and read by the main
+        // (rendering) thread. They must be atomic to avoid data races.
+        std::atomic<bool> m_lastShouldRender{true};
+        std::atomic<bool> m_asyncWaitPolled{false};
+        std::atomic<bool> m_asyncWaitCompleted{false};
 
         bool m_needDeferredSwapchainReleaseQuirk{false};
 
@@ -2821,6 +2883,10 @@ namespace openxr_api_layer {
         std::chrono::time_point<std::chrono::steady_clock> m_lastGoodEyeTrackingData{};
         std::optional<XrVector3f> m_lastGoodEyeGaze;
         bool m_loggedEyeTrackingWarning{false};
+
+        // Configurable eye tracking parameters (see settings.cfg).
+        float m_eyeTrackingConfidenceThreshold{0.5f};
+        uint32_t m_eyeGazeCacheTimeoutMs{600};
 
         bool m_debugFocusView{false};
         bool m_debugEyeGaze{false};
