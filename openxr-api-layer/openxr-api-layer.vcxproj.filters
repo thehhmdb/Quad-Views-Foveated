@@ -21,6 +21,9 @@
     <Filter Include="fmt">
       <UniqueIdentifier>{f859919c-f06c-4ab3-93c7-9fb1cfc3df3e}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Logic">
+      <UniqueIdentifier>{a1b2c3d4-e5f6-7890-abcd-ef1234567890}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h">
@@ -56,6 +59,45 @@
     <ClInclude Include="resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="logic\config.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\view_math.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\eye_tracker.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\swapchain_manager.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\graphics_context.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\frame_pipeline.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\debug_keys.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\focus_fov_quirk.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\action_manager.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\view_resolution.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\layer_composer.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\gaze_space_manager.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
+    <ClInclude Include="logic\swapchain_interceptor.h">
+      <Filter>Logic</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -63,6 +105,45 @@
     </ClCompile>
     <ClCompile Include="layer.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\config.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\view_math.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\eye_tracker.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\swapchain_manager.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\graphics_context.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\frame_pipeline.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\debug_keys.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\focus_fov_quirk.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\action_manager.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\view_resolution.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\layer_composer.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\gaze_space_manager.cpp">
+      <Filter>Logic</Filter>
+    </ClCompile>
+    <ClCompile Include="logic\swapchain_interceptor.cpp">
+      <Filter>Logic</Filter>
     </ClCompile>
     <ClCompile Include="framework\dispatch.cpp">
       <Filter>Framework</Filter>

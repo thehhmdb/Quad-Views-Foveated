@@ -39,6 +39,9 @@ namespace openxr_api_layer {
         // Sharpened images (2 views: left + right)
         ComPtr<ID3D12Resource> sharpenedImage[xr::StereoView::Count];
 
+        // History textures for temporal stability (TAA-lite)
+        ComPtr<ID3D12Resource> historyImage[xr::StereoView::Count];
+
         // Current acquired full FOV image index
         uint32_t acquiredFullFovImageIndex{0};
     };
@@ -64,8 +67,20 @@ namespace openxr_api_layer {
 
         // Evict the cached graphics state for a swapchain. Must be called by the layer when a
         // swapchain is destroyed, to avoid holding dangling raw texture pointers.
-        void evictSwapchainState(XrSwapchain handle) {
+        void evictSwapchainState(XrSwapchain handle) override {
             m_swapchainStates.erase(handle);
+        }
+
+        void waitForGpuIdle() override;
+
+        // Returns the composition fence and current value for external synchronization.
+        // Callers can wait on this fence before destroying swapchains to ensure
+        // all GPU work referencing the swapchain images has completed.
+        void* getCompositionFence() const override {
+            return m_compositionFence.Get();
+        }
+        uint64_t getCompositionFenceValue() const override {
+            return m_fenceValue;
         }
 
     private:
@@ -75,22 +90,35 @@ namespace openxr_api_layer {
         ComPtr<ID3D12CommandQueue> m_queue;
         OpenXrApi* m_openXrApi{nullptr};
 
-        // Composition resources
-        ComPtr<ID3D12DescriptorHeap> m_cbvSrvHeap[xr::StereoView::Count]; // Double-buffered
+        // 3-frame pipelining: we keep 3 frames in flight to allow CPU/GPU parallelism.
+        // Frame N is being recorded, Frame N-1 is being executed, Frame N-2 is being waited on.
+        static constexpr uint32_t kFrameCount = 3;
+        uint32_t m_currentFrameIndex{0};
+        
+        // Per-frame resources (triple-buffered)
+        ComPtr<ID3D12CommandAllocator> m_compositionAllocator[kFrameCount][xr::StereoView::Count];
+        ComPtr<ID3D12GraphicsCommandList> m_cachedCmdList[kFrameCount][xr::StereoView::Count];
+        ComPtr<ID3D12DescriptorHeap> m_cbvSrvHeap[kFrameCount][xr::StereoView::Count];
+        ComPtr<ID3D12Resource> m_projectionVSConstants[kFrameCount];
+        ComPtr<ID3D12Resource> m_projectionPSConstants[kFrameCount];
+        ComPtr<ID3D12Resource> m_sharpeningCSConstants[kFrameCount];
+        
+        // Fence for synchronization - one per frame in flight
+        ComPtr<ID3D12Fence> m_frameFence[kFrameCount];
+        UINT64 m_frameFenceValue[kFrameCount]{0};
+        
+        // Global composition fence (for external synchronization)
+        ComPtr<ID3D12Fence> m_compositionFence;
+        UINT64 m_fenceValue{0};
+
+        // Shared resources (not per-frame)
         ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
         ComPtr<ID3D12DescriptorHeap> m_samplerHeap;
-        UINT64 m_cbvSrvHeapFrameIndex{0};
         ComPtr<ID3D12PipelineState> m_projectionPSO;
         ComPtr<ID3D12PipelineState> m_sharpeningPSO;
         ComPtr<ID3D12RootSignature> m_projectionRootSignature;
         ComPtr<ID3D12RootSignature> m_sharpeningRootSignature;
-        ComPtr<ID3D12Resource> m_projectionVSConstants;
-        ComPtr<ID3D12Resource> m_projectionPSConstants;
-        ComPtr<ID3D12Resource> m_sharpeningCSConstants;
         ComPtr<ID3D12Resource> m_blankTexture;
-        ComPtr<ID3D12CommandAllocator> m_compositionAllocator[xr::StereoView::Count];
-        ComPtr<ID3D12Fence> m_compositionFence;
-        UINT64 m_fenceValue{0};
 
         // Per-swapchain graphics state (keyed by stereo swapchain handle)
         std::unordered_map<XrSwapchain, D3D12SwapchainGraphicsState> m_swapchainStates;

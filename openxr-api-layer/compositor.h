@@ -47,10 +47,12 @@ namespace openxr_api_layer {
         bool useQuadViews;
         float smoothenFocusViewEdges;
         float sharpenFocusView;
+        float chromaticAberrationCorrection;
         bool debugFocusView;
         bool debugEyeGaze;
         XrVector2f eyeGaze;
         XrCompositionLayerFlags layerFlags;
+        uint32_t frameCount;          // Frame counter for temporal effects (jitter, history blend)
     };
 
     // Abstract interface for graphics API-specific composition.
@@ -92,6 +94,16 @@ namespace openxr_api_layer {
         // Evict the cached graphics state for a swapchain. The layer must call this when a
         // swapchain is destroyed so the compositor does not hold dangling raw texture pointers.
         virtual void evictSwapchainState(XrSwapchain handle) = 0;
+
+        // FIX: Wait for the GPU to finish all composition work.
+        // Must be called before destroying swapchains or the session.
+        virtual void waitForGpuIdle() = 0;
+
+        // Returns the composition fence and current value for external synchronization.
+        // Callers can wait on this fence before destroying swapchains to ensure
+        // all GPU work referencing the swapchain images has completed.
+        virtual void* getCompositionFence() const { return nullptr; }
+        virtual uint64_t getCompositionFenceValue() const { return 0; }
     };
 
     // Factory function to create the appropriate compositor for the detected graphics API.

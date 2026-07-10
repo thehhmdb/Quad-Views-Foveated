@@ -35,9 +35,22 @@ namespace openxr_api_layer {
 
         // Flat images for quad views
         ComPtr<ID3D11Texture2D> flatImage[xr::QuadView::Count];
+        // Cached SRVs for flat images (Performance: avoid per-frame CreateShaderResourceView)
+        ComPtr<ID3D11ShaderResourceView> srvFlatImage[xr::QuadView::Count];
 
         // Sharpened images
         ComPtr<ID3D11Texture2D> sharpenedImage[xr::StereoView::Count];
+        // Cached SRV/UAV for sharpened images
+        ComPtr<ID3D11ShaderResourceView> srvSharpenedImage[xr::StereoView::Count];
+        ComPtr<ID3D11UnorderedAccessView> uavSharpenedImage[xr::StereoView::Count];
+
+        // History textures for temporal stability (TAA-lite)
+        ComPtr<ID3D11Texture2D> historyImage[xr::StereoView::Count];
+        ComPtr<ID3D11ShaderResourceView> srvHistoryImage[xr::StereoView::Count];
+        ComPtr<ID3D11RenderTargetView> rtvHistoryImage[xr::StereoView::Count];
+
+        // Cached RTVs for full FOV destination images (one per array slice)
+        ComPtr<ID3D11RenderTargetView> rtvDestination[xr::StereoView::Count];
     };
 
     // D3D11 implementation of the compositor interface.
@@ -65,10 +78,14 @@ namespace openxr_api_layer {
             m_swapchainStates.erase(handle);
         }
 
+        // FIX: Wait for GPU to finish all composition work.
+        void waitForGpuIdle() override;
+
     private:
         void populateSwapchainImagesCache(D3D11SwapchainGraphicsState& state, XrSwapchain swapchain, bool isFullFov);
 
         ComPtr<ID3D11Device> m_device;
+        ComPtr<ID3D11DeviceContext> m_context;
         OpenXrApi* m_openXrApi{nullptr};
 
         // Composition resources

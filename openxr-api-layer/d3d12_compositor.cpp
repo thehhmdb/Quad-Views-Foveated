@@ -55,7 +55,9 @@ namespace openxr_api_layer {
         alignas(4) bool isUnpremultipliedAlpha;
         alignas(4) bool debugFocusView;
         alignas(4) float sharpenFocusView;
-        alignas(4) float _padding[2]; // Match D3D11 struct layout
+        alignas(4) float chromaticAberrationCorrection;
+        alignas(4) uint32_t frameCount;
+        alignas(4) float _padding[1]; // Match D3D11 struct layout
     };
 
     struct SharpeningCSConstants {
@@ -108,26 +110,28 @@ namespace openxr_api_layer {
 
         auto device = m_device.Get();
 
-        // Create descriptor heaps.
-        // CBV/SRV heap layout (16 descriptors):
+        // Create descriptor heaps - triple buffered for 3-frame pipelining
+        // CBV/SRV heap layout (16 descriptors per heap):
         //   0-1: Left eye VS_CBV + PS_CBV (created at runtime per frame)
         //   2-3: Right eye VS_CBV + PS_CBV (created at runtime per frame)
         //   4-5: Left eye SRVs (stereo + focus textures)
         //   8-9: Right eye SRVs (stereo + focus textures)
         //   10-11: Sharpening per-eye SRV/UAV
         //   12: Sharpening CS CBV (static)
-        for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
-            D3D12_DESCRIPTOR_HEAP_DESC desc{};
-            desc.NumDescriptors = 16;
-            desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-            desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            LogDebug("D3D12: Creating CBV/SRV descriptor heap {}...\n", i);
-            CHECK_HRCMD(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(m_cbvSrvHeap[i].ReleaseAndGetAddressOf())));
-            LogDebug("D3D12: CBV/SRV descriptor heap {} created\n", i);
+        for (uint32_t f = 0; f < kFrameCount; f++) {
+            for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
+                D3D12_DESCRIPTOR_HEAP_DESC desc{};
+                desc.NumDescriptors = 16;
+                desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+                desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+                LogDebug("D3D12: Creating CBV/SRV descriptor heap frame={}, view={}...\n", f, i);
+                CHECK_HRCMD(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(m_cbvSrvHeap[f][i].ReleaseAndGetAddressOf())));
+                LogDebug("D3D12: CBV/SRV descriptor heap frame={}, view={} created\n", f, i);
+            }
         }
-        m_cbvSrvHeapFrameIndex = 0;
+        m_currentFrameIndex = 0;
 
-        // Sampler heap
+        // Sampler heap (shared)
         {
             D3D12_DESCRIPTOR_HEAP_DESC desc{};
             desc.NumDescriptors = 2;
@@ -138,7 +142,7 @@ namespace openxr_api_layer {
             LogDebug("D3D12: Sampler heap created\n");
         }
 
-        // RTV heap
+        // RTV heap (shared)
         {
             D3D12_DESCRIPTOR_HEAP_DESC desc{};
             desc.NumDescriptors = 1;
@@ -169,7 +173,7 @@ namespace openxr_api_layer {
             LogDebug("D3D12: Sampler descriptor created\n");
         }
 
-        // Create upload heaps for constant buffers
+        // Create upload heaps for constant buffers - triple buffered
         {
             D3D12_HEAP_PROPERTIES heapProps{};
             heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -189,36 +193,40 @@ namespace openxr_api_layer {
             desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
             desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-            CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
-                                                        D3D12_HEAP_FLAG_NONE,
-                                                        &desc,
-                                                        D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                        nullptr,
-                                                        IID_PPV_ARGS(m_projectionVSConstants.ReleaseAndGetAddressOf())));
-            CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
-                                                        D3D12_HEAP_FLAG_NONE,
-                                                        &desc,
-                                                        D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                        nullptr,
-                                                        IID_PPV_ARGS(m_projectionPSConstants.ReleaseAndGetAddressOf())));
-            CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
-                                                        D3D12_HEAP_FLAG_NONE,
-                                                        &desc,
-                                                        D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                        nullptr,
-                                                        IID_PPV_ARGS(m_sharpeningCSConstants.ReleaseAndGetAddressOf())));
+            for (uint32_t f = 0; f < kFrameCount; f++) {
+                CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
+                                                            D3D12_HEAP_FLAG_NONE,
+                                                            &desc,
+                                                            D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                            nullptr,
+                                                            IID_PPV_ARGS(m_projectionVSConstants[f].ReleaseAndGetAddressOf())));
+                CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
+                                                            D3D12_HEAP_FLAG_NONE,
+                                                            &desc,
+                                                            D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                            nullptr,
+                                                            IID_PPV_ARGS(m_projectionPSConstants[f].ReleaseAndGetAddressOf())));
+                CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
+                                                            D3D12_HEAP_FLAG_NONE,
+                                                            &desc,
+                                                            D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                            nullptr,
+                                                            IID_PPV_ARGS(m_sharpeningCSConstants[f].ReleaseAndGetAddressOf())));
+            }
         }
 
-        // Create static CBV descriptor for sharpening CS
+        // Create static CBV descriptor for sharpening CS (one per frame, per view)
         {
             const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            for (uint32_t h = 0; h < xr::StereoView::Count; h++) {
-                CD3DX12_CPU_DESCRIPTOR_HANDLE cbvHandle(m_cbvSrvHeap[h]->GetCPUDescriptorHandleForHeapStart());
-                cbvHandle.Offset(12 * incrementSize);
-                D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
-                cbvDesc.BufferLocation = m_sharpeningCSConstants->GetGPUVirtualAddress();
-                cbvDesc.SizeInBytes = 256;
-                device->CreateConstantBufferView(&cbvDesc, cbvHandle);
+            for (uint32_t f = 0; f < kFrameCount; f++) {
+                for (uint32_t h = 0; h < xr::StereoView::Count; h++) {
+                    CD3DX12_CPU_DESCRIPTOR_HANDLE cbvHandle(m_cbvSrvHeap[f][h]->GetCPUDescriptorHandleForHeapStart());
+                    cbvHandle.Offset(12 * incrementSize);
+                    D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
+                    cbvDesc.BufferLocation = m_sharpeningCSConstants[f]->GetGPUVirtualAddress();
+                    cbvDesc.SizeInBytes = 256;
+                    device->CreateConstantBufferView(&cbvDesc, cbvHandle);
+                }
             }
         }
 
@@ -247,7 +255,7 @@ namespace openxr_api_layer {
             }
         }
 
-        // Create blank texture SRV
+        // Create blank texture SRV (one per frame, per view)
         {
             const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
@@ -256,23 +264,33 @@ namespace openxr_api_layer {
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srvDesc.Texture2D.MipLevels = 1;
 
-            for (uint32_t h = 0; h < xr::StereoView::Count; h++) {
-                CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[h]->GetCPUDescriptorHandleForHeapStart());
-                srvHandle.Offset(3 * incrementSize);
-                device->CreateShaderResourceView(m_blankTexture.Get(), &srvDesc, srvHandle);
+            for (uint32_t f = 0; f < kFrameCount; f++) {
+                for (uint32_t h = 0; h < xr::StereoView::Count; h++) {
+                    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[f][h]->GetCPUDescriptorHandleForHeapStart());
+                    srvHandle.Offset(3 * incrementSize);
+                    device->CreateShaderResourceView(m_blankTexture.Get(), &srvDesc, srvHandle);
+                }
             }
             LogDebug("D3D12: Blank texture SRV created\n");
         }
 
-        // Create command allocators
-        for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
-            LogDebug("D3D12: Creating command allocator {}...\n", i);
-            CHECK_HRCMD(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                       IID_PPV_ARGS(m_compositionAllocator[i].ReleaseAndGetAddressOf())));
-            LogDebug("D3D12: Command allocator {} created\n", i);
+        // Create command allocators - triple buffered
+        for (uint32_t f = 0; f < kFrameCount; f++) {
+            for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
+                LogDebug("D3D12: Creating command allocator frame={}, view={}...\n", f, i);
+                CHECK_HRCMD(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                           IID_PPV_ARGS(m_compositionAllocator[f][i].ReleaseAndGetAddressOf())));
+                LogDebug("D3D12: Command allocator frame={}, view={} created\n", f, i);
+            }
         }
 
-        // Create fence
+        // Create fences - one per frame in flight
+        for (uint32_t f = 0; f < kFrameCount; f++) {
+            CHECK_HRCMD(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_frameFence[f].ReleaseAndGetAddressOf())));
+            m_frameFenceValue[f] = 0;
+        }
+
+        // Global composition fence (for external synchronization)
         CHECK_HRCMD(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_compositionFence.ReleaseAndGetAddressOf())));
         m_fenceValue = 0;
         LogDebug("D3D12: Composition fence created\n");
@@ -300,7 +318,7 @@ namespace openxr_api_layer {
             CD3DX12_DESCRIPTOR_RANGE cbvRangeVS(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
             CD3DX12_DESCRIPTOR_RANGE cbvRangePS(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
             CD3DX12_DESCRIPTOR_RANGE samplerRange(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0);
-            CD3DX12_DESCRIPTOR_RANGE srvRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
+            CD3DX12_DESCRIPTOR_RANGE srvRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); // 3 textures: stereo, focus, history
 
             CD3DX12_ROOT_PARAMETER rootParams[4];
             rootParams[0].InitAsDescriptorTable(1, &cbvRangeVS, D3D12_SHADER_VISIBILITY_VERTEX);
@@ -390,9 +408,10 @@ namespace openxr_api_layer {
         auto device = m_device.Get();
         auto queue = m_queue.Get();
         const uint32_t viewIndex = params.viewIndex;
+        const uint32_t frameIndex = m_currentFrameIndex;
 
-        LogDebug("D3D12 compositeView: viewIndex={}, device={:p}, queue={:p}\n",
-                        viewIndex, static_cast<void*>(device), static_cast<void*>(queue));
+        LogDebug("D3D12 compositeView: viewIndex={}, frameIndex={}, device={:p}, queue={:p}\n",
+                        viewIndex, frameIndex, static_cast<void*>(device), static_cast<void*>(queue));
 
         // Get or create swapchain graphics state
         auto& stereoState = m_swapchainStates[stereoSwapchain.handle];
@@ -441,34 +460,60 @@ namespace openxr_api_layer {
                             stereoState.acquiredFullFovImageIndex);
         }
 
+        // Create history textures for temporal stability if not already created
+        {
+            D3D12_RESOURCE_DESC destDesc = destinationImage->GetDesc();
+            for (uint32_t v = 0; v < xr::StereoView::Count; v++) {
+                if (!stereoState.historyImage[v]) {
+                    D3D12_HEAP_PROPERTIES heapProps{};
+                    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+                    heapProps.CreationNodeMask = heapProps.VisibleNodeMask = 1;
+
+                    D3D12_RESOURCE_DESC histDesc = destDesc;
+                    histDesc.DepthOrArraySize = 1;
+                    histDesc.MipLevels = 1;
+                    histDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+                    CHECK_HRCMD(device->CreateCommittedResource(
+                        &heapProps,
+                        D3D12_HEAP_FLAG_NONE,
+                        &histDesc,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        nullptr,
+                        IID_PPV_ARGS(stereoState.historyImage[v].ReleaseAndGetAddressOf())));
+                }
+            }
+        }
+
         // Timer (optional profiling - disabled in refactored compositor)
 
-        // Wait for GPU (view 0 only)
-        if (viewIndex == 0 && m_compositionFence) {
-            UINT64 fenceValueToWait = m_fenceValue;
-            if (m_compositionFence->GetCompletedValue() < fenceValueToWait) {
+        // Wait for the frame that's 3 frames old to complete (if we've wrapped around)
+        // This ensures we don't overwrite resources that are still in use by the GPU.
+        if (m_frameFence[frameIndex]) {
+            UINT64 fenceValueToWait = m_frameFenceValue[frameIndex];
+            if (fenceValueToWait > 0 && m_frameFence[frameIndex]->GetCompletedValue() < fenceValueToWait) {
                 HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                m_compositionFence->SetEventOnCompletion(fenceValueToWait, event);
+                m_frameFence[frameIndex]->SetEventOnCompletion(fenceValueToWait, event);
                 WaitForSingleObject(event, INFINITE);
                 CloseHandle(event);
             }
         }
 
-        // Reset command allocator and create a fresh command list for this eye.
-        //
-        // We intentionally create a new ID3D12GraphicsCommandList every frame rather than caching
-        // and Reset()-ing one. A cached list that ever fails Close() (e.g. due to an invalid
-        // recorded command) is left in the open/recording state, after which Reset() permanently
-        // returns E_INVALIDARG — the compositor can never recover and every subsequent frame is
-        // blank. A fresh list per frame is slightly more expensive but is self-healing: each frame
-        // starts from a known-good, implicitly-opened list. See quad-views-improvement-plan §4.2.
-        CHECK_HRCMD(m_compositionAllocator[viewIndex]->Reset());
-        ComPtr<ID3D12GraphicsCommandList> cmdList;
-        CHECK_HRCMD(device->CreateCommandList(0,
-                                              D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                              m_compositionAllocator[viewIndex].Get(),
-                                              nullptr,
-                                              IID_PPV_ARGS(cmdList.ReleaseAndGetAddressOf())));
+        // Performance: Use cached command list to avoid per-frame CreateCommandList overhead.
+        // If Close() ever fails, we discard the cached list and recreate (self-healing).
+        CHECK_HRCMD(m_compositionAllocator[frameIndex][viewIndex]->Reset());
+        ComPtr<ID3D12GraphicsCommandList> cmdList = m_cachedCmdList[frameIndex][viewIndex];
+        if (!cmdList) {
+            CHECK_HRCMD(device->CreateCommandList(0,
+                                                  D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                  m_compositionAllocator[frameIndex][viewIndex].Get(),
+                                                  nullptr,
+                                                  IID_PPV_ARGS(cmdList.ReleaseAndGetAddressOf())));
+            m_cachedCmdList[frameIndex][viewIndex] = cmdList;
+        } else {
+            // Reuse cached list - it's implicitly opened after Reset()
+            CHECK_HRCMD(cmdList->Reset(m_compositionAllocator[frameIndex][viewIndex].Get(), nullptr));
+        }
 
         // Lambda: flatten source image
         const auto flattenSourceImage = [&](ID3D12Resource* image,
@@ -610,15 +655,14 @@ namespace openxr_api_layer {
 
             void* constData;
             D3D12_RANGE range = {0, 0};
-            CHECK_HRCMD(m_sharpeningCSConstants->Map(0, &range, &constData));
+            CHECK_HRCMD(m_sharpeningCSConstants[frameIndex]->Map(0, &range, &constData));
             memcpy(constData, &sharpening, sizeof(sharpening));
-            m_sharpeningCSConstants->Unmap(0, nullptr);
+            m_sharpeningCSConstants[frameIndex]->Unmap(0, nullptr);
 
             // Dispatch compute shader
             cmdList->SetPipelineState(m_sharpeningPSO.Get());
             cmdList->SetComputeRootSignature(m_sharpeningRootSignature.Get());
-            const uint32_t heapIndex = (m_cbvSrvHeapFrameIndex + viewIndex) % xr::StereoView::Count;
-            cmdList->SetDescriptorHeaps(1, m_cbvSrvHeap[heapIndex].GetAddressOf());
+            cmdList->SetDescriptorHeaps(1, m_cbvSrvHeap[frameIndex][viewIndex].GetAddressOf());
 
             // Create SRV/UAV descriptors
             {
@@ -639,25 +683,25 @@ namespace openxr_api_layer {
                 uavDesc.Format = kSharpenedFormat;
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
-                CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[heapIndex]->GetCPUDescriptorHandleForHeapStart());
+                CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
                 srvHandle.Offset(srvIndex * incrementSize);
                 device->CreateShaderResourceView(focusState.flatImage[xr::StereoView::Count + viewIndex].Get(), &srvDesc, srvHandle);
 
-                CD3DX12_CPU_DESCRIPTOR_HANDLE uavHandle(m_cbvSrvHeap[heapIndex]->GetCPUDescriptorHandleForHeapStart());
+                CD3DX12_CPU_DESCRIPTOR_HANDLE uavHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
                 uavHandle.Offset(uavIndex * incrementSize);
                 device->CreateUnorderedAccessView(focusState.sharpenedImage[viewIndex].Get(), nullptr, &uavDesc, uavHandle);
             }
 
             // Bind root descriptors
-            CD3DX12_GPU_DESCRIPTOR_HANDLE csCbvHandle(m_cbvSrvHeap[heapIndex]->GetGPUDescriptorHandleForHeapStart());
+            CD3DX12_GPU_DESCRIPTOR_HANDLE csCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
             csCbvHandle.Offset(12 * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
             cmdList->SetComputeRootDescriptorTable(0, csCbvHandle);
 
-            CD3DX12_GPU_DESCRIPTOR_HANDLE csSrvHandle(m_cbvSrvHeap[heapIndex]->GetGPUDescriptorHandleForHeapStart());
+            CD3DX12_GPU_DESCRIPTOR_HANDLE csSrvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
             csSrvHandle.Offset((8 + (viewIndex * 2)) * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
             cmdList->SetComputeRootDescriptorTable(1, csSrvHandle);
 
-            CD3DX12_GPU_DESCRIPTOR_HANDLE csUavHandle(m_cbvSrvHeap[heapIndex]->GetGPUDescriptorHandleForHeapStart());
+            CD3DX12_GPU_DESCRIPTOR_HANDLE csUavHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
             csUavHandle.Offset((9 + (viewIndex * 2)) * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
             cmdList->SetComputeRootDescriptorTable(2, csUavHandle);
 
@@ -694,7 +738,7 @@ namespace openxr_api_layer {
             cmdList->ResourceBarrier(2, barriersCsOut);
         }
 
-        // Composite - update constant buffers
+        // Composite - update constant buffers (batched Map/Unmap for performance)
         const size_t vsConstantsStride = 256;
         const size_t psConstantsStride = 256;
         const size_t vsOffset = viewIndex * vsConstantsStride;
@@ -712,13 +756,6 @@ namespace openxr_api_layer {
                 DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, baseLayerViewProjection) *
                                            layerViewProjection));
         }
-        {
-            void* constData;
-            D3D12_RANGE range = {0, 0};
-            CHECK_HRCMD(m_projectionVSConstants->Map(0, &range, &constData));
-            memcpy((uint8_t*)constData + vsOffset, &projection, sizeof(projection));
-            m_projectionVSConstants->Unmap(0, nullptr);
-        }
 
         ProjectionPSConstants drawing{};
         drawing.smoothingArea = params.useQuadViews ? params.smoothenFocusViewEdges : 0;
@@ -726,32 +763,37 @@ namespace openxr_api_layer {
         drawing.isUnpremultipliedAlpha = params.layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
         drawing.debugFocusView = params.debugFocusView;
         drawing.sharpenFocusView = params.sharpenFocusView;
-        {
-            void* constData;
-            D3D12_RANGE range = {0, 0};
-            CHECK_HRCMD(m_projectionPSConstants->Map(0, &range, &constData));
-            memcpy((uint8_t*)constData + psOffset, &drawing, sizeof(drawing));
-            m_projectionPSConstants->Unmap(0, nullptr);
-        }
+        drawing.chromaticAberrationCorrection = params.chromaticAberrationCorrection;
+        drawing.frameCount = params.frameCount;
 
-        // Create per-eye CBV descriptors
+        // Performance: Batch both constant buffer updates into a single Map/Unmap pair
+        void* vsConstData;
+        void* psConstData;
+        D3D12_RANGE range = {0, 0};
+        CHECK_HRCMD(m_projectionVSConstants[frameIndex]->Map(0, &range, &vsConstData));
+        CHECK_HRCMD(m_projectionPSConstants[frameIndex]->Map(0, &range, &psConstData));
+        memcpy((uint8_t*)vsConstData + vsOffset, &projection, sizeof(projection));
+        memcpy((uint8_t*)psConstData + psOffset, &drawing, sizeof(drawing));
+        m_projectionVSConstants[frameIndex]->Unmap(0, nullptr);
+        m_projectionPSConstants[frameIndex]->Unmap(0, nullptr);
+
+        // Create per-eye CBV descriptors (per-frame)
         {
             const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             const uint32_t vsCbvIndex = viewIndex * 2;
             const uint32_t psCbvIndex = viewIndex * 2 + 1;
-            const uint32_t heapIndex = (m_cbvSrvHeapFrameIndex + viewIndex) % xr::StereoView::Count;
 
             D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
             cbvDesc.SizeInBytes = 256;
 
-            CD3DX12_CPU_DESCRIPTOR_HANDLE vsCbvHandle(m_cbvSrvHeap[heapIndex]->GetCPUDescriptorHandleForHeapStart());
+            CD3DX12_CPU_DESCRIPTOR_HANDLE vsCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
             vsCbvHandle.Offset(vsCbvIndex * incrementSize);
-            cbvDesc.BufferLocation = m_projectionVSConstants->GetGPUVirtualAddress() + vsOffset;
+            cbvDesc.BufferLocation = m_projectionVSConstants[frameIndex]->GetGPUVirtualAddress() + vsOffset;
             device->CreateConstantBufferView(&cbvDesc, vsCbvHandle);
 
-            CD3DX12_CPU_DESCRIPTOR_HANDLE psCbvHandle(m_cbvSrvHeap[heapIndex]->GetCPUDescriptorHandleForHeapStart());
+            CD3DX12_CPU_DESCRIPTOR_HANDLE psCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
             psCbvHandle.Offset(psCbvIndex * incrementSize);
-            cbvDesc.BufferLocation = m_projectionPSConstants->GetGPUVirtualAddress() + psOffset;
+            cbvDesc.BufferLocation = m_projectionPSConstants[frameIndex]->GetGPUVirtualAddress() + psOffset;
             device->CreateConstantBufferView(&cbvDesc, psCbvHandle);
         }
 
@@ -787,19 +829,19 @@ namespace openxr_api_layer {
         D3D12_RECT scissor = {0, 0, (LONG)params.fullFovResolution.width, (LONG)params.fullFovResolution.height};
         cmdList->RSSetScissorRects(1, &scissor);
 
-        // Create SRVs for source textures
+        // Create SRVs for source textures (per-frame)
         ID3D12Resource* stereoTex = nullptr;
         ID3D12Resource* focusTex = nullptr;
+        ID3D12Resource* historyTex = nullptr;
         {
             const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             const uint32_t srvBase = 4 + (viewIndex * 4);
-            const uint32_t heapIndex = (m_cbvSrvHeapFrameIndex + viewIndex) % xr::StereoView::Count;
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srvDesc.Texture2D.MipLevels = 1;
 
-            CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[heapIndex]->GetCPUDescriptorHandleForHeapStart());
+            CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
             srvHandle.Offset(srvBase * incrementSize);
             // Flat images are created with the swapchain format; specify it explicitly instead
             // of DXGI_FORMAT_UNKNOWN so the format does not depend on driver inference.
@@ -826,32 +868,42 @@ namespace openxr_api_layer {
                 srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
             }
             device->CreateShaderResourceView(focusTex, &srvDesc, srvHandle);
+
+            // Bind History Texture SRV (t2)
+            srvHandle.Offset(incrementSize);
+            historyTex = stereoState.historyImage[viewIndex].Get();
+            if (historyTex) {
+                srvDesc.Format = (DXGI_FORMAT)stereoSwapchain.createInfo.format;
+                device->CreateShaderResourceView(historyTex, &srvDesc, srvHandle);
+            } else {
+                historyTex = m_blankTexture.Get();
+                srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                device->CreateShaderResourceView(historyTex, &srvDesc, srvHandle);
+            }
         }
 
         // Bind and draw
-        const uint32_t heapIndex = (m_cbvSrvHeapFrameIndex + viewIndex) % xr::StereoView::Count;
-
         cmdList->SetPipelineState(m_projectionPSO.Get());
         cmdList->SetGraphicsRootSignature(m_projectionRootSignature.Get());
-        ID3D12DescriptorHeap* heaps[2] = {m_cbvSrvHeap[heapIndex].Get(), m_samplerHeap.Get()};
+        ID3D12DescriptorHeap* heaps[2] = {m_cbvSrvHeap[frameIndex][viewIndex].Get(), m_samplerHeap.Get()};
         cmdList->SetDescriptorHeaps(2, heaps);
 
         const uint32_t vsCbvIndex = viewIndex * 2;
         const uint32_t psCbvIndex = viewIndex * 2 + 1;
         const auto descInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE vsCbvHandle(m_cbvSrvHeap[heapIndex]->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE vsCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
         vsCbvHandle.Offset(vsCbvIndex * descInc);
         cmdList->SetGraphicsRootDescriptorTable(0, vsCbvHandle);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE psCbvHandle(m_cbvSrvHeap[heapIndex]->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE psCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
         psCbvHandle.Offset(psCbvIndex * descInc);
         cmdList->SetGraphicsRootDescriptorTable(1, psCbvHandle);
 
         cmdList->SetGraphicsRootDescriptorTable(2, m_samplerHeap->GetGPUDescriptorHandleForHeapStart());
 
         const uint32_t srvBase = 4 + (viewIndex * 4);
-        CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[heapIndex]->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
         srvHandle.Offset(srvBase * descInc);
         cmdList->SetGraphicsRootDescriptorTable(3, srvHandle);
 
@@ -867,24 +919,29 @@ namespace openxr_api_layer {
             cmdList->ResourceBarrier(1, &barrier);
         }
 
-        CHECK_HRCMD(cmdList->Close());
+        HRESULT hr = cmdList->Close();
+        if (FAILED(hr)) {
+            // Close() failed - discard cached list so it gets recreated next frame (self-healing)
+            m_cachedCmdList[frameIndex][viewIndex].Reset();
+            CHECK_HRCMD(hr);
+        }
         queue->ExecuteCommandLists(1, reinterpret_cast<ID3D12CommandList* const*>(cmdList.GetAddressOf()));
 
         // Timer stop (optional profiling - disabled in refactored compositor)
 
-        // Signal fence and wait (view 1 only)
+        // Signal frame fence and advance frame index (view 1 only)
         if (viewIndex == xr::StereoView::Right) {
+            m_frameFenceValue[frameIndex]++;
+            queue->Signal(m_frameFence[frameIndex].Get(), m_frameFenceValue[frameIndex]);
+            
+            // Also signal global composition fence for external synchronization
             m_fenceValue++;
             queue->Signal(m_compositionFence.Get(), m_fenceValue);
-            m_cbvSrvHeapFrameIndex++;
+            
+            // Advance to next frame in the pipeline
+            m_currentFrameIndex = (m_currentFrameIndex + 1) % kFrameCount;
 
-            if (m_compositionFence->GetCompletedValue() < m_fenceValue) {
-                HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                m_compositionFence->SetEventOnCompletion(m_fenceValue, event);
-                WaitForSingleObject(event, INFINITE);
-                CloseHandle(event);
-            }
-            LogDebug("  D3D12 composition complete (fence={})\n", m_fenceValue);
+            LogDebug("  D3D12 composition complete (frame={}, fence={})\n", frameIndex, m_fenceValue);
 
             // Call base class virtual method directly to bypass layer's deferred release quirk
             const XrResult releaseResult =
@@ -898,23 +955,68 @@ namespace openxr_api_layer {
     }
 
     void D3D12Compositor::destroy() {
+        // FIX: Wait for GPU to finish all composition work before releasing anything.
+        // Without this, the GPU might execute commands referencing resources we are about to free.
+        if (m_queue && m_compositionFence) {
+            m_fenceValue++;
+            CHECK_HRCMD(m_queue->Signal(m_compositionFence.Get(), m_fenceValue));
+            if (m_compositionFence->GetCompletedValue() < m_fenceValue) {
+                HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                CHECK_HRCMD(m_compositionFence->SetEventOnCompletion(m_fenceValue, event));
+                // Use timeout to prevent infinite hangs, but still wait for completion
+                WaitForSingleObject(event, 5000); // 5-second timeout to prevent infinite hangs
+                CloseHandle(event);
+            }
+        }
+
+        // Also wait for all frame fences
+        for (uint32_t f = 0; f < kFrameCount; f++) {
+            if (m_queue && m_frameFence[f]) {
+                m_frameFenceValue[f]++;
+                CHECK_HRCMD(m_queue->Signal(m_frameFence[f].Get(), m_frameFenceValue[f]));
+                if (m_frameFence[f]->GetCompletedValue() < m_frameFenceValue[f]) {
+                    HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                    CHECK_HRCMD(m_frameFence[f]->SetEventOnCompletion(m_frameFenceValue[f], event));
+                    WaitForSingleObject(event, 5000);
+                    CloseHandle(event);
+                }
+            }
+        }
+
         // Idempotent: safe to call multiple times (ComPtr::Reset() is a no-op on already-null pointers).
         m_swapchainStates.clear();
-        m_cbvSrvHeap[0].Reset();
-        m_cbvSrvHeap[1].Reset();
+        for (uint32_t f = 0; f < kFrameCount; f++) {
+            for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
+                m_cbvSrvHeap[f][i].Reset();
+                m_compositionAllocator[f][i].Reset();
+                m_cachedCmdList[f][i].Reset();
+            }
+            m_projectionVSConstants[f].Reset();
+            m_projectionPSConstants[f].Reset();
+            m_sharpeningCSConstants[f].Reset();
+            m_frameFence[f].Reset();
+        }
         m_rtvHeap.Reset();
         m_samplerHeap.Reset();
         m_projectionPSO.Reset();
         m_sharpeningPSO.Reset();
         m_projectionRootSignature.Reset();
         m_sharpeningRootSignature.Reset();
-        m_projectionVSConstants.Reset();
-        m_projectionPSConstants.Reset();
-        m_sharpeningCSConstants.Reset();
         m_blankTexture.Reset();
-        m_compositionAllocator[0].Reset();
-        m_compositionAllocator[1].Reset();
         m_compositionFence.Reset();
+    }
+
+    void D3D12Compositor::waitForGpuIdle() {
+        if (m_queue && m_compositionFence) {
+            m_fenceValue++;
+            CHECK_HRCMD(m_queue->Signal(m_compositionFence.Get(), m_fenceValue));
+            if (m_compositionFence->GetCompletedValue() < m_fenceValue) {
+                HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                CHECK_HRCMD(m_compositionFence->SetEventOnCompletion(m_fenceValue, event));
+                WaitForSingleObject(event, 5000); // 5-second timeout
+                CloseHandle(event);
+            }
+        }
     }
 
     std::unique_ptr<ICompositor> createD3D12Compositor(ID3D12Device* device, ID3D12CommandQueue* queue, OpenXrApi* openXrApi) {

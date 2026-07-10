@@ -28,11 +28,22 @@ cbuffer ConstantBuffer : register(b0) {
     bool isUnpremultipliedAlpha;
     bool debugFocusView;
     float sharpenFocusView;
+    float chromaticAberrationCorrection;
+    uint frameCount;
+    // Sub-rectangle info for direct swapchain sampling (eliminates flatten copy)
+    float4 stereoSubRect;
+    float4 focusSubRect;
+    float2 stereoSwapchainSize;
+    float2 focusSwapchainSize;
+    // Flags to enable/disable direct sampling
+    bool useDirectStereoSampling;
+    bool useDirectFocusSampling;
 };
 
 SamplerState sourceSampler : register(s0);
 Texture2D sourceStereoTexture : register(t0);
 Texture2D sourceFocusTexture : register(t1);
+Texture2D sourceHistoryTexture : register(t2);
 
 float4 premultiplyAlpha(float4 color) {
     return float4(color.rgb * color.a, color.a);
@@ -46,17 +57,36 @@ float4 unpremultiplyAlpha(float4 color) {
     }
 }
 
-float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, in float3 projectedFocusCoord : PROJ_COORD1) : SV_TARGET {
-    // Convert to texcoord and pick the pixel from each layer.
-    float4 color0 = sourceStereoTexture.Sample(sourceSampler, texcoord);
+float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, in float3 projectedFocusCoord : PROJ_COORD1, in float2 stereoTexCoord : PROJ_COORD2, in float2 focusTexCoord : PROJ_COORD3) : SV_TARGET {
+    // Sample stereo texture - either from full texture (old path) or sub-rectangle (new path)
+    float4 color0;
+    if (useDirectStereoSampling) {
+        // Clamp to sub-rectangle bounds
+        float2 clampedStereoTexCoord = clamp(stereoTexCoord, float2(0, 0), float2(1, 1));
+        color0 = sourceStereoTexture.Sample(sourceSampler, clampedStereoTexCoord);
+        // Outside sub-rectangle = transparent
+        color0.a *= step(0.0, stereoTexCoord.x) * step(stereoTexCoord.x, 1.0) * step(0.0, stereoTexCoord.y) * step(stereoTexCoord.y, 1.0);
+    } else {
+        color0 = sourceStereoTexture.Sample(sourceSampler, texcoord);
+    }
 
     // Guard against division by zero when the projected focus Z is 0 (degenerate projection),
     // which would produce NaN/Inf and corrupt the composited output.
     float projectedZ = abs(projectedFocusCoord.z) > 1e-6f ? projectedFocusCoord.z : 1e-6f;
     float2 layer1ProjectedCoordNdc = projectedFocusCoord.xy / projectedZ;
     float2 layer1TexCoord = layer1ProjectedCoordNdc * float2(0.5f, -0.5f) + 0.5f;
-    // For pixels outside of the focus view, the sampler will give us a fully transparent pixel.
-    float4 color1 = sourceFocusTexture.Sample(sourceSampler, layer1TexCoord);
+    
+    // Sample focus texture - either from full texture (old path) or sub-rectangle (new path)
+    float4 color1;
+    if (useDirectFocusSampling) {
+        float2 clampedFocusTexCoord = clamp(focusTexCoord, float2(0, 0), float2(1, 1));
+        color1 = sourceFocusTexture.Sample(sourceSampler, clampedFocusTexCoord);
+        // Outside sub-rectangle = transparent
+        color1.a *= step(0.0, focusTexCoord.x) * step(focusTexCoord.x, 1.0) * step(0.0, focusTexCoord.y) * step(focusTexCoord.y, 1.0);
+    } else {
+        // For pixels outside of the focus view, the sampler will give us a fully transparent pixel.
+        color1 = sourceFocusTexture.Sample(sourceSampler, layer1TexCoord);
+    }
 
     if (ignoreAlpha) {
         color0.a = color1.a = 1;
@@ -100,13 +130,38 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
             sourceFocusTexture.GetDimensions(focusWidth, focusHeight);
             float2 texel = float2(1.0 / focusWidth, 1.0 / focusHeight);
 
-            float3 blurred = color1.rgb * 0.4;
-            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord + float2(texel.x, 0)).rgb * 0.15;
-            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord - float2(texel.x, 0)).rgb * 0.15;
-            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord + float2(0, texel.y)).rgb * 0.15;
-            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord - float2(0, texel.y)).rgb * 0.15;
+            // 9-tap Gaussian blur (separable approximation in one pass)
+            // Weights for sigma ~ 1.0: center=0.227, 1-tap=0.195, 2-tap=0.122, 3-tap=0.054, 4-tap=0.016
+            float3 blurred = color1.rgb * 0.227027;
+            
+            // Horizontal taps
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord + float2(texel.x * 1.5, 0)).rgb * 0.1945946;
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord - float2(texel.x * 1.5, 0)).rgb * 0.1945946;
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord + float2(texel.x * 3.5, 0)).rgb * 0.1216216;
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord - float2(texel.x * 3.5, 0)).rgb * 0.1216216;
+            
+            // Vertical taps
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord + float2(0, texel.y * 1.5)).rgb * 0.1945946;
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord - float2(0, texel.y * 1.5)).rgb * 0.1945946;
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord + float2(0, texel.y * 3.5)).rgb * 0.1216216;
+            blurred += sourceFocusTexture.Sample(sourceSampler, layer1TexCoord - float2(0, texel.y * 3.5)).rgb * 0.1216216;
 
             color1.rgb = lerp(color1.rgb, blurred, blurMask * sharpenFocusView);
+        }
+
+        // Chromatic aberration correction in the transition zone.
+        // Counteracts perceived chromatic aberration caused by the resolution
+        // discontinuity at the foveation boundary by applying an inverse radial
+        // channel split to the RGB channels.
+        if (chromaticAberrationCorrection > 0.0) {
+            float2 dir = layer1TexCoord - 0.5;
+            float2 chromaOffset = dir * chromaticAberrationCorrection * blurMask;
+
+            float rChannel = sourceFocusTexture.Sample(sourceSampler, layer1TexCoord + chromaOffset).r;
+            float bChannel = sourceFocusTexture.Sample(sourceSampler, layer1TexCoord - chromaOffset).b;
+
+            color1.r = lerp(color1.r, rChannel, blurMask);
+            color1.b = lerp(color1.b, bChannel, blurMask);
         }
     }
 

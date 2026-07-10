@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>QuadViewsFoveatedTests</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.26100.0</_ProjectFileVersion>
+    <IncludePath>$(MSBuildThisFileDirectory);$(MSBuildThisFileDirectory)..\openxr-api-layer;$(MSBuildThisFileDirectory)..\openxr-api-layer\framework;$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.ImplementationLibrary.1.0.220201.1\include;$(MSBuildThisFileDirectory)..\external\fmt\include;$(MSBuildThisFileDirectory)..\external\OpenXR-SDK\include;$(MSBuildThisFileDirectory)..\external\OpenXR-SDK\src\common;$(MSBuildThisFileDirectory)..\external\OpenXR-MixedReality\Shared\XrUtility;$(MSBuildThisFileDirectory)..\external\OpenXR-MixedReality\Shared\SampleShared;$(MSBuildThisFileDirectory)..\external\OpenXR-MixedReality\shared\ext;$(MSBuildThisFileDirectory)..\external\OpenXR-MixedReality\shared\ext\DirectXMath\Inc;$(MSBuildThisFileDirectory)..\external\FidelityFX-CAS\ffx-cas;$(MSBuildThisFileDirectory)..\external\fmt\test\gtest;$(IncludePath)</IncludePath>
+    <LibraryPath>$(MSBuildThisFileDirectory)..\openxr-api-layer\bin\x64\$(Configuration);$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;GTEST_HAS_RTTI=0;LAYER_NAME="XR_APILAYER_MBUCCHIA_quad_views_foveated";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(IncludePath)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(LibraryPath)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;GTEST_HAS_RTTI=0;LAYER_NAME="XR_APILAYER_MBUCCHIA_quad_views_foveated";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(IncludePath)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalLibraryDirectories>$(LibraryPath)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="tests.cpp" />
+    <ClCompile Include="TestViewMath.cpp" />
+    <ClCompile Include="TestFramePipeline.cpp" />
+    <ClCompile Include="TestEyeTracker.cpp" />
+    <ClCompile Include="$(SolutionDir)external\fmt\test\gtest\gmock-gtest-all.cc" />
+    <ClCompile Include="$(SolutionDir)external\fmt\src\format.cc" />
+    <!-- Logic implementations needed by tests -->
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\config.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\view_math.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\frame_pipeline.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\eye_tracker.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\gaze_space_manager.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\swapchain_interceptor.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\swapchain_manager.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\focus_fov_quirk.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\layer_composer.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\view_resolution.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\action_manager.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\logic\debug_keys.cpp" />
+    <!-- Framework implementations -->
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\framework\dispatch.gen.cpp" />
+    <ClCompile Include="$(SolutionDir)openxr-api-layer\framework\log.cpp" />
+    <!-- Stub for layer-level symbols needed by tests -->
+    <ClCompile Include="LayerStubs.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="MockOpenXrApi.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>
