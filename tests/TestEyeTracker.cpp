@@ -39,6 +39,12 @@ namespace openxr_api_layer {
             // Default timeout for cached gaze data.
             config.m_eyeGazeCacheTimeoutMs = 100;
         }
+
+        void TearDown() override {
+            // getSimulatedTracking() calls ClipCursor() to confine the mouse.
+            // Release it here so it doesn't leak into other tests or the desktop.
+            ClipCursor(nullptr);
+        }
     };
 
     TEST_F(EyeTrackerTest, InitialType_IsNone) {
@@ -76,7 +82,7 @@ namespace openxr_api_layer {
 
         bool valid = tracker.getEyeGaze(session, 0, false, gaze);
         EXPECT_TRUE(valid);
-        EXPECT_TRUE(tracker.m_lastGoodEyeGaze.has_value());
+        EXPECT_TRUE(tracker.lastGoodEyeGaze().has_value());
     }
 
     TEST_F(EyeTrackerTest, CacheTimeout_ClearsCachedGaze) {
@@ -89,7 +95,7 @@ namespace openxr_api_layer {
         // Get initial gaze to populate cache.
         bool valid = tracker.getEyeGaze(session, 0, false, gaze);
         EXPECT_TRUE(valid);
-        EXPECT_TRUE(tracker.m_lastGoodEyeGaze.has_value());
+        EXPECT_TRUE(tracker.lastGoodEyeGaze().has_value());
 
         // Wait longer than the cache timeout.
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

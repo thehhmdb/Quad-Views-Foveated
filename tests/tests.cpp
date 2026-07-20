@@ -23,9 +23,30 @@
 #include "pch.h"
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include "framework/log.h" // For g_traceProvider
+
+// Definition of the global unloading flag for the test build (the layer's
+// layer.cpp is not linked into the test executable). Mirrors the single
+// definition in the layer. Declared extern in tests/pch.h.
+namespace openxr_api_layer {
+    bool g_isUnloading = false;
+} // namespace openxr_api_layer
+
+class GlobalTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        // FIX: Register the trace provider so TraceLoggingWrite doesn't crash
+        TraceLoggingRegister(openxr_api_layer::log::g_traceProvider);
+    }
+
+    void TearDown() override {
+        TraceLoggingUnregister(openxr_api_layer::log::g_traceProvider);
+    }
+};
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     ::testing::InitGoogleMock(&argc, argv);
+    ::testing::AddGlobalTestEnvironment(new GlobalTestEnvironment());
     return RUN_ALL_TESTS();
 }

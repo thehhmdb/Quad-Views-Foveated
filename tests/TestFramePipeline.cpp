@@ -36,6 +36,8 @@ namespace openxr_api_layer {
         void SetUp() override {
             // Clear any state from previous test.
             pipeline.destroy();
+            // Wire up mock dispatch table so qualified base-class calls reach the mock.
+            mockApi.initializeForTesting();
         }
     };
 
@@ -63,24 +65,56 @@ namespace openxr_api_layer {
     }
 
     TEST_F(FramePipelineTest, NormalMode_WaitFrameCallsUnderlyingApi) {
-        // Skipped: TraceLoggingWrite crashes when the trace provider isn't registered.
-        // The waitFrame() method calls TraceLoggingWrite(g_traceProvider, ...) at entry,
-        // which requires the provider to be registered via TraceLoggingRegister().
-        // In the real layer, this happens in entry.cpp during DllMain/layer initialization.
-        // Unit tests don't go through this path, so we test the state management methods instead.
-        SUCCEED() << "Skipped — requires trace provider registration";
+        XrFrameState frameState{XR_TYPE_FRAME_STATE};
+        bool isAsyncMode = false;
+
+        EXPECT_CALL(mockApi, xrWaitFrame(testing::_, testing::_, testing::_))
+            .WillOnce(testing::DoAll(
+                testing::SetArgPointee<2>(frameState),
+                testing::Return(XR_SUCCESS)));
+
+        EXPECT_EQ(pipeline.waitFrame(&mockApi, reinterpret_cast<XrSession>(1), nullptr, &frameState, false, &isAsyncMode), XR_SUCCESS);
+        EXPECT_FALSE(isAsyncMode);
     }
 
     TEST_F(FramePipelineTest, NormalMode_BeginFrameCallsUnderlyingApi) {
-        SUCCEED() << "Skipped — requires trace provider registration";
+        EXPECT_CALL(mockApi, xrBeginFrame(testing::_, testing::_))
+            .WillOnce(testing::Return(XR_SUCCESS));
+
+        EXPECT_EQ(pipeline.beginFrame(&mockApi, reinterpret_cast<XrSession>(1), nullptr, false), XR_SUCCESS);
     }
 
     TEST_F(FramePipelineTest, NormalMode_EndFrameCallsUnderlyingApi) {
-        SUCCEED() << "Skipped — requires trace provider registration";
+        XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
+        bool isAsyncMode = false;
+
+        EXPECT_CALL(mockApi, xrEndFrame(testing::_, testing::_))
+            .WillOnce(testing::Return(XR_SUCCESS));
+
+        EXPECT_EQ(pipeline.endFrame(&mockApi, reinterpret_cast<XrSession>(1), &endInfo, false, &isAsyncMode), XR_SUCCESS);
+        EXPECT_FALSE(isAsyncMode);
     }
 
     TEST_F(FramePipelineTest, TurboMode_EndFrameEngagesAsyncMode) {
-        SUCCEED() << "Skipped — requires trace provider registration";
+        XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
+        bool isAsyncMode = false;
+
+        // First call: enters async mode (spawns background wait thread)
+        EXPECT_CALL(mockApi, xrEndFrame(testing::_, testing::_))
+            .WillOnce(testing::Return(XR_SUCCESS));
+
+        // Turbo mode may also call xrWaitFrame in the background thread
+        EXPECT_CALL(mockApi, xrWaitFrame(testing::_, testing::_, testing::_))
+            .Times(testing::AtMost(2))
+            .WillRepeatedly(testing::Return(XR_ERROR_SESSION_LOST));
+
+        // First endFrame in turbo mode should engage async mode
+        XrResult result = pipeline.endFrame(&mockApi, reinterpret_cast<XrSession>(1), &endInfo, true, &isAsyncMode);
+        if (result == XR_SUCCESS) {
+            EXPECT_TRUE(isAsyncMode);
+        }
+        // Cleanup async thread
+        pipeline.destroy();
     }
 
     TEST_F(FramePipelineTest, FrameRate_DefaultIsZero) {

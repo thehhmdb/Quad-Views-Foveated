@@ -31,12 +31,15 @@ using namespace openxr_api_layer::log;
 
 namespace openxr_api_layer {
 
+    // Track Vive dummy instance that was intentionally leaked (Vive runtime doesn't like mid-init destruction).
+    XrInstance g_leakedDummyInstance = XR_NULL_HANDLE;
+
     // Entry point for creating the layer.
     XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* const instanceCreateInfo,
                                                  const struct XrApiLayerCreateInfo* const apiLayerInfo,
                                                  XrInstance* const instance) {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrCreateApiLayerInstance");
+        QVF_TRACE_START(local, "xrCreateApiLayerInstance");
 
         if (!apiLayerInfo || apiLayerInfo->structType != XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO ||
             apiLayerInfo->structVersion != XR_API_LAYER_CREATE_INFO_STRUCT_VERSION ||
@@ -54,7 +57,7 @@ namespace openxr_api_layer {
         {
             auto info = apiLayerInfo->nextInfo;
             while (info) {
-                TraceLoggingWriteTagged(local, "xrCreateApiLayerInstance", TLArg(info->layerName, "LayerName"));
+                QVF_TRACE_TAGGED(local, "xrCreateApiLayerInstance", TLArg(info->layerName, "LayerName"));
                 Log(fmt::format("Using layer: {}\n", info->layerName));
                 info = info->next;
             }
@@ -116,7 +119,7 @@ namespace openxr_api_layer {
                 }
 
                 // Workaround: the Vive runtime does not seem to like our flow of destroying the instance
-                // mid-initialization. We skip destruction and we will just create a second instance.
+                // mid-initialization. We skip destruction and track the dummy instance for later cleanup.
                 if (xrGetSystem && xrGetSystemProperties) {
                     XrSystemGetInfo getInfo{XR_TYPE_SYSTEM_GET_INFO};
                     getInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
@@ -125,6 +128,7 @@ namespace openxr_api_layer {
                         XrSystemProperties systemProperties{XR_TYPE_SYSTEM_PROPERTIES};
                         CHECK_XRCMD(xrGetSystemProperties(dummyInstance, systemId, &systemProperties));
                         if (std::string(systemProperties.systemName).find("Vive Reality system") != std::string::npos) {
+                            g_leakedDummyInstance = dummyInstance;
                             xrDestroyInstance = nullptr;
                         }
                     }
@@ -141,7 +145,7 @@ namespace openxr_api_layer {
         std::vector<const char*> newEnabledExtensionNames;
         for (uint32_t i = 0; i < chainInstanceCreateInfo.enabledExtensionCount; i++) {
             const std::string_view ext(chainInstanceCreateInfo.enabledExtensionNames[i]);
-            TraceLoggingWriteTagged(local, "xrCreateApiLayerInstance", TLArg(ext.data(), "ExtensionName"));
+            QVF_TRACE_TAGGED(local, "xrCreateApiLayerInstance", TLArg(ext.data(), "ExtensionName"));
 
             if (std::find(blockedExtensions.cbegin(), blockedExtensions.cend(), ext) == blockedExtensions.cend()) {
                 Log(fmt::format("Requested extension: {}\n", ext));
@@ -172,8 +176,12 @@ namespace openxr_api_layer {
             try {
                 result = openxr_api_layer::GetInstance()->xrCreateInstance(instanceCreateInfo);
             } catch (std::exception& exc) {
-                TraceLoggingWriteTagged(local, "xrCreateInstance_Error", TLArg(exc.what(), "Error"));
+                QVF_TRACE_TAGGED(local, "xrCreateInstance_Error", TLArg(exc.what(), "Error"));
                 ErrorLog(fmt::format("xrCreateInstance: {}\n", exc.what()));
+                result = XR_ERROR_RUNTIME_FAILURE;
+            } catch (...) {
+                QVF_TRACE_TAGGED(local, "xrCreateInstance_Error", TLArg("Unknown exception", "Error"));
+                ErrorLog(fmt::format("xrCreateInstance: Unknown exception\n"));
                 result = XR_ERROR_RUNTIME_FAILURE;
             }
 
@@ -184,10 +192,32 @@ namespace openxr_api_layer {
                         *instance, "xrDestroyInstance", reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyInstance)))) {
                     xrDestroyInstance(*instance);
                 }
+
+                // FIX (Item 16): Clean up leaked Vive dummy instance if the real instance creation failed.
+                if (g_leakedDummyInstance != XR_NULL_HANDLE) {
+                    PFN_xrDestroyInstance destroyDummy = nullptr;
+                    apiLayerInfo->nextInfo->nextGetInstanceProcAddr(
+                        *instance, "xrDestroyInstance", reinterpret_cast<PFN_xrVoidFunction*>(&destroyDummy));
+                    if (destroyDummy) {
+                        destroyDummy(g_leakedDummyInstance);
+                    }
+                    g_leakedDummyInstance = XR_NULL_HANDLE;
+                }
             }
         }
 
-        TraceLoggingWriteStop(local, "xrCreateApiLayerInstance", TLArg(xr::ToCString(result), "Result"));
+        // Clean up leaked Vive dummy instance now that the real instance is created.
+        if (XR_SUCCEEDED(result) && g_leakedDummyInstance != XR_NULL_HANDLE) {
+            PFN_xrDestroyInstance destroyDummy = nullptr;
+            apiLayerInfo->nextInfo->nextGetInstanceProcAddr(
+                *instance, "xrDestroyInstance", reinterpret_cast<PFN_xrVoidFunction*>(&destroyDummy));
+            if (destroyDummy) {
+                destroyDummy(g_leakedDummyInstance);
+            }
+            g_leakedDummyInstance = XR_NULL_HANDLE;
+        }
+
+        QVF_TRACE_STOP(local, "xrCreateApiLayerInstance", TLArg(xr::ToCString(result), "Result"));
         if (XR_FAILED(result)) {
             ErrorLog(fmt::format("xrCreateApiLayerInstance failed with {}\n", xr::ToCString(result)));
         }
@@ -198,7 +228,7 @@ namespace openxr_api_layer {
     // Forward the xrGetInstanceProcAddr() call to the dispatcher.
     XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrGetInstanceProcAddr");
+        QVF_TRACE_START(local, "xrGetInstanceProcAddr");
 
         XrResult result;
         try {
@@ -210,12 +240,16 @@ namespace openxr_api_layer {
                 result = openxr_api_layer::GetInstance()->xrGetInstanceProcAddrInternal(instance, name, function);
             }
         } catch (std::exception& exc) {
-            TraceLoggingWriteTagged(local, "xrGetInstanceProcAddr_Error", TLArg(exc.what(), "Error"));
+            QVF_TRACE_TAGGED(local, "xrGetInstanceProcAddr_Error", TLArg(exc.what(), "Error"));
             ErrorLog(fmt::format("xrGetInstanceProcAddr: {}\n", exc.what()));
+            result = XR_ERROR_RUNTIME_FAILURE;
+        } catch (...) {
+            QVF_TRACE_TAGGED(local, "xrGetInstanceProcAddr_Error", TLArg("Unknown exception", "Error"));
+            ErrorLog(fmt::format("xrGetInstanceProcAddr: Unknown exception\n"));
             result = XR_ERROR_RUNTIME_FAILURE;
         }
 
-        TraceLoggingWriteStop(local, "xrGetInstanceProcAddr", TLArg(xr::ToCString(result), "Result"));
+        QVF_TRACE_STOP(local, "xrGetInstanceProcAddr", TLArg(xr::ToCString(result), "Result"));
 
         return result;
     }

@@ -75,9 +75,6 @@ using Microsoft::WRL::ComPtr;
 #include <d3d12shader.h>
 #endif
 
-// DirectXMath (needed by eye_tracker.cpp for XMVector3NormalizeEst)
-#include <DirectXMath.h>
-
 // OpenXR + Windows-specific definitions.
 #define XR_NO_PROTOTYPES
 #define XR_USE_PLATFORM_WIN32
@@ -105,3 +102,9 @@ using Microsoft::WRL::ComPtr;
 #endif
 
 #include <utils/inputs.h>
+
+namespace openxr_api_layer {
+    // Global flag to indicate the DLL is being unloaded.
+    // Used to skip dangerous GPU synchronization during process teardown.
+    extern bool g_isUnloading;
+} // namespace openxr_api_layer

@@ -69,9 +69,8 @@ namespace openxr_api_layer {
                 }
             }
 
-            TraceLoggingWrite(g_traceProvider,
-                              "xrEnumerateViewConfigurationViews",
-                              TLArg(foveatedRenderingActive, "FoveatedRenderingActive"));
+            QVF_TRACE("xrEnumerateViewConfigurationViews",
+                      TLArg(foveatedRenderingActive, "FoveatedRenderingActive"));
         }
 
         const float basePixelDensity = stereoViews[xr::StereoView::Left].recommendedImageRectWidth /

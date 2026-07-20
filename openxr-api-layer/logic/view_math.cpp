@@ -107,8 +107,10 @@ namespace openxr_api_layer {
             viewForGazeProjection.pose = m_cachedEyePoses[stereoViewIndex];
             viewForGazeProjection.fov = views[stereoViewIndex].fov;
             XrVector2f projectedGaze;
-            LogDebug("  xrLocateViews[{}]: gazeUnitVector=({},{},{}), isGazeValid={}\n",
-                stereoViewIndex, gazeUnitVector.x, gazeUnitVector.y, gazeUnitVector.z, isGazeValid);
+            if (IsTraceEnabled()) {
+                LogDebug("  xrLocateViews[{}]: gazeUnitVector=({},{},{}), isGazeValid={}\n",
+                    stereoViewIndex, gazeUnitVector.x, gazeUnitVector.y, gazeUnitVector.z, isGazeValid);
+            }
             if (!isGazeValid || !ProjectPoint(viewForGazeProjection, gazeUnitVector, projectedGaze)) {
                 views[i].fov = viewConfigType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
                                    ? m_cachedEyeFov[xr::StereoView::Count + i]
@@ -117,10 +119,11 @@ namespace openxr_api_layer {
                 // Shift FOV according to the eye gaze.
                 // We also widen the FOV when near the edges of the headset to make sure
                 // there's enough overlap between the two eyes.
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrLocateViews",
-                                  TLArg(i, "ViewIndex"),
-                                  TLArg(xr::ToString(projectedGaze).c_str(), "ProjectedGaze"));
+                if (IsTraceEnabled()) {
+                    QVF_TRACE("xrLocateViews",
+                              TLArg(i, "ViewIndex"),
+                              TLArg(xr::ToString(projectedGaze).c_str(), "ProjectedGaze"));
+                }
                 m_eyeGaze[stereoViewIndex] = projectedGaze;
                 m_eyeGaze[stereoViewIndex] = m_eyeGaze[stereoViewIndex] +
                                              XrVector2f{stereoViewIndex == xr::StereoView::Left ? -m_config.m_horizontalFocusOffset
@@ -139,19 +142,20 @@ namespace openxr_api_layer {
                                      std::clamp(m_eyeGaze[stereoViewIndex].y - verticalFovSection, -1.f, 1.f)};
                 const XrVector2f max{std::clamp(m_eyeGaze[stereoViewIndex].x + horizontalFovSection, -1.f, 1.f),
                                      std::clamp(m_eyeGaze[stereoViewIndex].y + verticalFovSection, -1.f, 1.f)};
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrLocateViews",
-                                  TLArg(i, "ViewIndex"),
-                                  TLArg(xr::ToString(min).c_str(), "FocusTopLeft"),
-                                  TLArg(xr::ToString(max).c_str(), "FocusBottomRight"));
-                LogDebug("  xrLocateViews[{}]: projectedGaze=({},{}), eyeGaze=({},{}), centerOfFov=({},{}), v=({},{}), min=({},{}), max=({},{}), hSection={}, vSection={}\n",
-                    stereoViewIndex,
-                    projectedGaze.x, projectedGaze.y,
-                    m_eyeGaze[stereoViewIndex].x, m_eyeGaze[stereoViewIndex].y,
-                    m_centerOfFov[stereoViewIndex].x, m_centerOfFov[stereoViewIndex].y,
-                    v.x, v.y,
-                    min.x, min.y, max.x, max.y,
-                    horizontalFovSection, verticalFovSection);
+                if (IsTraceEnabled()) {
+                    QVF_TRACE("xrLocateViews",
+                              TLArg(i, "ViewIndex"),
+                              TLArg(xr::ToString(min).c_str(), "FocusTopLeft"),
+                              TLArg(xr::ToString(max).c_str(), "FocusBottomRight"));
+                    LogDebug("  xrLocateViews[{}]: projectedGaze=({},{}), eyeGaze=({},{}), centerOfFov=({},{}), v=({},{}), min=({},{}), max=({},{}), hSection={}, vSection={}\n",
+                        stereoViewIndex,
+                        projectedGaze.x, projectedGaze.y,
+                        m_eyeGaze[stereoViewIndex].x, m_eyeGaze[stereoViewIndex].y,
+                        m_centerOfFov[stereoViewIndex].x, m_centerOfFov[stereoViewIndex].y,
+                        v.x, v.y,
+                        min.x, min.y, max.x, max.y,
+                        horizontalFovSection, verticalFovSection);
+                }
                 views[i].fov = xr::math::ComputeBoundingFov(m_cachedEyeFov[stereoViewIndex], min, max);
             }
         }

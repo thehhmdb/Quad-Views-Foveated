@@ -27,11 +27,8 @@
 #include "util.h"
 #include "views.h"
 #include "framework/dispatch.gen.h"
-#include <utils/graphics.h>
-
-#define A_CPU
-#include <ffx_a.h>
-#include <ffx_cas.h>
+#include "logic/compositor_shared.h"
+#include "utils/d3d12_helpers.h"
 
 #include <ProjectionVS.h>
 #include <ProjectionPS.h>
@@ -42,46 +39,21 @@ namespace openxr_api_layer {
     using namespace log;
     using namespace xr::math;
 
-    // Anonymous namespace to avoid ODR violations with FFX-CAS inline functions
-    namespace {
-        // Constant buffer structs (shared between D3D11 and D3D12 compositors)
-        struct ProjectionVSConstants {
-        alignas(16) DirectX::XMFLOAT4X4 focusProjection;
-    };
-
-    struct ProjectionPSConstants {
-        alignas(4) float smoothingArea;
-        alignas(4) bool ignoreAlpha;
-        alignas(4) bool isUnpremultipliedAlpha;
-        alignas(4) bool debugFocusView;
-        alignas(4) float sharpenFocusView;
-        alignas(4) float chromaticAberrationCorrection;
-        alignas(4) uint32_t frameCount;
-        alignas(4) float _padding[1]; // Match D3D11 struct layout
-    };
-
-    struct SharpeningCSConstants {
-        alignas(4) uint32_t Const0[4];
-        alignas(4) uint32_t Const1[4];
-    };
-
     // Format used for the sharpened (CAS output) texture.
     // R32G32B32A32_FLOAT matches the CAS shader's RWTexture2D<float4> declaration.
     // R16G16B16A16_FLOAT caused GPU device-removed crashes on some drivers when the CAS
     // shader writes float4 values that exceed the 16-bit range (HDR content).
     constexpr DXGI_FORMAT kSharpenedFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
 
-    } // end anonymous namespace
-
     D3D12Compositor::D3D12Compositor(ID3D12Device* device, ID3D12CommandQueue* queue, OpenXrApi* openXrApi)
-        : m_device(device)
-        , m_queue(queue)
-        , m_openXrApi(openXrApi) {
+        : BaseCompositor(openXrApi)
+        , m_device(device)
+        , m_queue(queue) {
         // ComPtr's initializing constructor already AddRefs the device/queue; no explicit AddRef needed.
     }
 
     bool D3D12Compositor::isInitialized() const {
-        return m_projectionPSO != nullptr;
+        return m_initialized;
     }
 
     void D3D12Compositor::populateSwapchainImagesCache(D3D12SwapchainGraphicsState& state, XrSwapchain swapchain, bool isFullFov) {
@@ -105,33 +77,47 @@ namespace openxr_api_layer {
     }
 
     bool D3D12Compositor::initialize(int32_t swapchainFormat) {
-        TraceLoggingWrite(g_traceProvider, "InitializeCompositionResources", TLArg("D3D12", "Api"));
+        QVF_TRACE("InitializeCompositionResources", TLArg("D3D12", "Api"));
         LogDebug("D3D12 initializeCompositionResources: starting... (format={})\n", swapchainFormat);
 
         auto device = m_device.Get();
 
-        // Create descriptor heaps - triple buffered for 3-frame pipelining
-        // CBV/SRV heap layout (16 descriptors per heap):
-        //   0-1: Left eye VS_CBV + PS_CBV (created at runtime per frame)
-        //   2-3: Right eye VS_CBV + PS_CBV (created at runtime per frame)
-        //   4-5: Left eye SRVs (stereo + focus textures)
-        //   8-9: Right eye SRVs (stereo + focus textures)
-        //   10-11: Sharpening per-eye SRV/UAV
-        //   12: Sharpening CS CBV (static)
+        // Enable D3D12 debug layer in debug builds for validation
+#ifdef _DEBUG
+        {
+            ComPtr<ID3D12Debug> debugController;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
+                debugController->EnableDebugLayer();
+                LogDebug("D3D12: Debug layer enabled\n");
+            }
+        }
+#endif
+
+        // Create descriptor heaps - triple buffered for 3-frame pipelining (Item 9)
+        // CBV/SRV heap layout (16 descriptors): see DescriptorLayout for slot assignments.
         for (uint32_t f = 0; f < kFrameCount; f++) {
             for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
                 D3D12_DESCRIPTOR_HEAP_DESC desc{};
-                desc.NumDescriptors = 16;
+                desc.NumDescriptors = DescriptorLayout::kHeapSize;
                 desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
                 desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-                LogDebug("D3D12: Creating CBV/SRV descriptor heap frame={}, view={}...\n", f, i);
+                LogDebug("D3D12: Creating CBV/SRV descriptor heap [{}][{}]...\n", f, i);
                 CHECK_HRCMD(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(m_cbvSrvHeap[f][i].ReleaseAndGetAddressOf())));
-                LogDebug("D3D12: CBV/SRV descriptor heap frame={}, view={} created\n", f, i);
             }
         }
         m_currentFrameIndex = 0;
 
-        // Sampler heap (shared)
+        // CPU descriptor heap (non-shader-visible cache to avoid per-frame CreateShaderResourceView overhead)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC cpuHeapDesc{};
+            cpuHeapDesc.NumDescriptors = 1024;
+            cpuHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+            cpuHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            CHECK_HRCMD(device->CreateDescriptorHeap(&cpuHeapDesc,
+                IID_PPV_ARGS(m_cpuCbvSrvHeap.ReleaseAndGetAddressOf())));
+        }
+
+        // Sampler heap
         {
             D3D12_DESCRIPTOR_HEAP_DESC desc{};
             desc.NumDescriptors = 2;
@@ -142,10 +128,10 @@ namespace openxr_api_layer {
             LogDebug("D3D12: Sampler heap created\n");
         }
 
-        // RTV heap (shared)
+        // RTV heap (8 descriptors for per-image caching: 3 swapchain images x 2 eyes = 6, rounded up)
         {
             D3D12_DESCRIPTOR_HEAP_DESC desc{};
-            desc.NumDescriptors = 1;
+            desc.NumDescriptors = 8;
             desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
             desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
             LogDebug("D3D12: Creating RTV descriptor heap...\n");
@@ -173,7 +159,7 @@ namespace openxr_api_layer {
             LogDebug("D3D12: Sampler descriptor created\n");
         }
 
-        // Create upload heaps for constant buffers - triple buffered
+        // Create upload heaps for constant buffers - triple buffered (Item 9)
         {
             D3D12_HEAP_PROPERTIES heapProps{};
             heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -213,19 +199,43 @@ namespace openxr_api_layer {
                                                             nullptr,
                                                             IID_PPV_ARGS(m_sharpeningCSConstants[f].ReleaseAndGetAddressOf())));
             }
-        }
 
-        // Create static CBV descriptor for sharpening CS (one per frame, per view)
-        {
-            const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            // FIX (Item 10): Persistently map the constant buffer upload heaps
+            // and initialize typed constant buffer writers.
+            D3D12_RANGE readRange{0, 0};
             for (uint32_t f = 0; f < kFrameCount; f++) {
-                for (uint32_t h = 0; h < xr::StereoView::Count; h++) {
-                    CD3DX12_CPU_DESCRIPTOR_HANDLE cbvHandle(m_cbvSrvHeap[f][h]->GetCPUDescriptorHandleForHeapStart());
-                    cbvHandle.Offset(12 * incrementSize);
+                uint8_t* vsMapped = nullptr;
+                uint8_t* psMapped = nullptr;
+                CHECK_HRCMD(m_projectionVSConstants[f]->Map(0, &readRange, reinterpret_cast<void**>(&vsMapped)));
+                CHECK_HRCMD(m_projectionPSConstants[f]->Map(0, &readRange, reinterpret_cast<void**>(&psMapped)));
+                m_vsConstantWriters[f].initialize(vsMapped);
+                m_psConstantWriters[f].initialize(psMapped);
+            }
+
+            // FIX (Item 9): Pre-create per-eye VS/PS CBV descriptors and sharpening CS CBV
+            const auto cbvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            for (uint32_t f = 0; f < kFrameCount; f++) {
+                for (uint32_t v = 0; v < xr::StereoView::Count; v++) {
+                    const size_t vsOffset = v * 256;
+                    const size_t psOffset = v * 256;
+
                     D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
-                    cbvDesc.BufferLocation = m_sharpeningCSConstants[f]->GetGPUVirtualAddress();
                     cbvDesc.SizeInBytes = 256;
-                    device->CreateConstantBufferView(&cbvDesc, cbvHandle);
+
+                    // VS CBV
+                    cbvDesc.BufferLocation = m_projectionVSConstants[f]->GetGPUVirtualAddress() + vsOffset;
+                    device->CreateConstantBufferView(&cbvDesc,
+                        DescriptorLayout::CpuHandle(m_cbvSrvHeap[f][v].Get(), DescriptorLayout::VsCbv(v), cbvInc));
+
+                    // PS CBV
+                    cbvDesc.BufferLocation = m_projectionPSConstants[f]->GetGPUVirtualAddress() + psOffset;
+                    device->CreateConstantBufferView(&cbvDesc,
+                        DescriptorLayout::CpuHandle(m_cbvSrvHeap[f][v].Get(), DescriptorLayout::PsCbv(v), cbvInc));
+
+                    // Sharpening CS CBV (static per heap)
+                    cbvDesc.BufferLocation = m_sharpeningCSConstants[f]->GetGPUVirtualAddress();
+                    device->CreateConstantBufferView(&cbvDesc,
+                        DescriptorLayout::CpuHandle(m_cbvSrvHeap[f][v].Get(), DescriptorLayout::kSharpenCbv, cbvInc));
                 }
             }
         }
@@ -242,20 +252,16 @@ namespace openxr_api_layer {
 
             D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(format, width, height, 1, 1, 1, D3D12_RESOURCE_FLAG_NONE);
 
-            HRESULT hr = device->CreateCommittedResource(&heapProps,
+            CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
                                                         D3D12_HEAP_FLAG_NONE,
                                                         &desc,
                                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                                         nullptr,
-                                                        IID_PPV_ARGS(m_blankTexture.ReleaseAndGetAddressOf()));
-            if (FAILED(hr)) {
-                LogDebug("  Blank texture creation failed with HRESULT=0x{:08X}\n", hr);
-            } else {
-                LogDebug("D3D12: Blank texture created successfully\n");
-            }
+                                                        IID_PPV_ARGS(m_blankTexture.ReleaseAndGetAddressOf())));
+            LogDebug("D3D12: Blank texture created successfully\n");
         }
 
-        // Create blank texture SRV (one per frame, per view)
+        // Create blank texture SRV at DescriptorLayout::kBlankSrv slot
         {
             const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
@@ -266,31 +272,22 @@ namespace openxr_api_layer {
 
             for (uint32_t f = 0; f < kFrameCount; f++) {
                 for (uint32_t h = 0; h < xr::StereoView::Count; h++) {
-                    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[f][h]->GetCPUDescriptorHandleForHeapStart());
-                    srvHandle.Offset(3 * incrementSize);
-                    device->CreateShaderResourceView(m_blankTexture.Get(), &srvDesc, srvHandle);
+                    device->CreateShaderResourceView(m_blankTexture.Get(), &srvDesc,
+                        DescriptorLayout::CpuHandle(m_cbvSrvHeap[f][h].Get(), DescriptorLayout::kBlankSrv, incrementSize));
                 }
             }
             LogDebug("D3D12: Blank texture SRV created\n");
         }
 
-        // Create command allocators - triple buffered
-        for (uint32_t f = 0; f < kFrameCount; f++) {
-            for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
-                LogDebug("D3D12: Creating command allocator frame={}, view={}...\n", f, i);
-                CHECK_HRCMD(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                           IID_PPV_ARGS(m_compositionAllocator[f][i].ReleaseAndGetAddressOf())));
-                LogDebug("D3D12: Command allocator frame={}, view={} created\n", f, i);
-            }
+        // Create command allocators
+        for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
+            LogDebug("D3D12: Creating command allocator {}...\n", i);
+            CHECK_HRCMD(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                       IID_PPV_ARGS(m_compositionAllocator[i].ReleaseAndGetAddressOf())));
+            LogDebug("D3D12: Command allocator {} created\n", i);
         }
 
-        // Create fences - one per frame in flight
-        for (uint32_t f = 0; f < kFrameCount; f++) {
-            CHECK_HRCMD(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_frameFence[f].ReleaseAndGetAddressOf())));
-            m_frameFenceValue[f] = 0;
-        }
-
-        // Global composition fence (for external synchronization)
+        // Create fence
         CHECK_HRCMD(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_compositionFence.ReleaseAndGetAddressOf())));
         m_fenceValue = 0;
         LogDebug("D3D12: Composition fence created\n");
@@ -318,7 +315,7 @@ namespace openxr_api_layer {
             CD3DX12_DESCRIPTOR_RANGE cbvRangeVS(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
             CD3DX12_DESCRIPTOR_RANGE cbvRangePS(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
             CD3DX12_DESCRIPTOR_RANGE samplerRange(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0);
-            CD3DX12_DESCRIPTOR_RANGE srvRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0); // 3 textures: stereo, focus, history
+            CD3DX12_DESCRIPTOR_RANGE srvRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
 
             CD3DX12_ROOT_PARAMETER rootParams[4];
             rootParams[0].InitAsDescriptorTable(1, &cbvRangeVS, D3D12_SHADER_VISIBILITY_VERTEX);
@@ -331,29 +328,16 @@ namespace openxr_api_layer {
             rsDesc.pParameters = rootParams;
             rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
             ComPtr<ID3DBlob> signature, error;
-            HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.GetAddressOf(), error.GetAddressOf());
-            if (FAILED(hr)) {
-                LogDebug("  Root signature serialization failed: 0x{:08X}\n", hr);
-                if (error) {
-                    LogDebug("  Error: {}\n", std::string(static_cast<char*>(error->GetBufferPointer()), error->GetBufferSize()));
-                }
-            }
-            hr = device->CreateRootSignature(0,
+            CHECK_HRCMD(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.GetAddressOf(), error.GetAddressOf()));
+            CHECK_HRCMD(device->CreateRootSignature(0,
                                              signature->GetBufferPointer(),
                                              signature->GetBufferSize(),
-                                             IID_PPV_ARGS(m_projectionRootSignature.ReleaseAndGetAddressOf()));
-            if (FAILED(hr)) {
-                LogDebug("  Root signature creation failed: 0x{:08X}\n", hr);
-            }
+                                             IID_PPV_ARGS(m_projectionRootSignature.ReleaseAndGetAddressOf())));
 
             psoDesc.pRootSignature = m_projectionRootSignature.Get();
-            hr = device->CreateGraphicsPipelineState(&psoDesc,
-                                                     IID_PPV_ARGS(m_projectionPSO.ReleaseAndGetAddressOf()));
-            if (FAILED(hr)) {
-                LogDebug("  PSO creation failed with HRESULT=0x{:08X}\n", hr);
-            } else {
-                LogDebug("D3D12: Projection PSO created\n");
-            }
+            CHECK_HRCMD(device->CreateGraphicsPipelineState(&psoDesc,
+                                                     IID_PPV_ARGS(m_projectionPSO.ReleaseAndGetAddressOf())));
+            LogDebug("D3D12: Projection PSO created\n");
         }
 
         // Create sharpening PSO
@@ -371,450 +355,404 @@ namespace openxr_api_layer {
             rsDesc.NumParameters = 3;
             rsDesc.pParameters = rootParams;
             ComPtr<ID3DBlob> signature, error;
-            HRESULT hr = D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.GetAddressOf(), error.GetAddressOf());
-            if (FAILED(hr)) {
-                LogDebug("  Sharpening root signature serialization failed: 0x{:08X}\n", hr);
-            }
-            hr = device->CreateRootSignature(0,
+            CHECK_HRCMD(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, signature.GetAddressOf(), error.GetAddressOf()));
+            CHECK_HRCMD(device->CreateRootSignature(0,
                                              signature->GetBufferPointer(),
                                              signature->GetBufferSize(),
-                                             IID_PPV_ARGS(m_sharpeningRootSignature.ReleaseAndGetAddressOf()));
-            if (FAILED(hr)) {
-                LogDebug("  Sharpening root signature creation failed: 0x{:08X}\n", hr);
-            }
+                                             IID_PPV_ARGS(m_sharpeningRootSignature.ReleaseAndGetAddressOf())));
 
             D3D12_COMPUTE_PIPELINE_STATE_DESC csDesc{};
             csDesc.CS = {g_SharpeningCS, sizeof(g_SharpeningCS)};
             csDesc.pRootSignature = m_sharpeningRootSignature.Get();
             csDesc.NodeMask = 0;
-            hr = device->CreateComputePipelineState(&csDesc,
-                                                    IID_PPV_ARGS(m_sharpeningPSO.ReleaseAndGetAddressOf()));
-            if (FAILED(hr)) {
-                LogDebug("  Sharpening PSO creation failed with HRESULT=0x{:08X}\n", hr);
-            } else {
-                LogDebug("D3D12: Sharpening PSO created\n");
-            }
+            CHECK_HRCMD(device->CreateComputePipelineState(&csDesc,
+                                                    IID_PPV_ARGS(m_sharpeningPSO.ReleaseAndGetAddressOf())));
+            LogDebug("D3D12: Sharpening PSO created\n");
         }
 
         LogDebug("D3D12: Composition resources initialized successfully!\n");
+        m_initialized = true;
         return true;
     }
 
-    void* D3D12Compositor::compositeView(const CompositorParams& params,
-                                          const SwapchainInfo& stereoSwapchain,
-                                          const XrCompositionLayerProjectionView& stereoView,
-                                          const SwapchainInfo& focusSwapchain,
-                                          const XrCompositionLayerProjectionView& focusView) {
-        auto device = m_device.Get();
-        auto queue = m_queue.Get();
+    // =======================================================================
+    // CRTP Hook: Stage 1 - Acquire destination image and resolve source textures
+    // Also handles D3D12-specific GPU sync and command list reset
+    // =======================================================================
+    bool D3D12Compositor::acquireAndResolveImages(
+            const CompositorParams& params,
+            const SwapchainInfo& stereoSwapchain,
+            const SwapchainInfo& focusSwapchain,
+            D3D12SwapchainGraphicsState& stereoState,
+            D3D12SwapchainGraphicsState& focusState,
+            void*& outSourceStereo,
+            void*& outSourceFocus,
+            void*& outDestination) {
         const uint32_t viewIndex = params.viewIndex;
-        const uint32_t frameIndex = m_currentFrameIndex;
 
-        LogDebug("D3D12 compositeView: viewIndex={}, frameIndex={}, device={:p}, queue={:p}\n",
-                        viewIndex, frameIndex, static_cast<void*>(device), static_cast<void*>(queue));
-
-        // Get or create swapchain graphics state
-        auto& stereoState = m_swapchainStates[stereoSwapchain.handle];
-        auto& focusState = m_swapchainStates[focusSwapchain.handle];
-
-        // Populate swapchain images cache
+        // Populate swapchain images cache (called from base class for stereo/focus, but we
+        // also need to populate the full-FOV cache below).
         populateSwapchainImagesCache(stereoState, stereoSwapchain.handle, false);
         populateSwapchainImagesCache(focusState, focusSwapchain.handle, false);
 
-        // Grab input/output textures
-        ID3D12Resource* sourceImage = nullptr;
-        ID3D12Resource* sourceFocusImage = nullptr;
-        ID3D12Resource* destinationImage = nullptr;
-        {
-            if (params.useQuadViews) {
-                sourceImage = stereoState.images[stereoSwapchain.lastReleasedIndex];
-                LogDebug("  sourceImage={:p}, lastReleasedIndex={}\n",
-                    static_cast<void*>(sourceImage), stereoSwapchain.lastReleasedIndex);
+        if (params.useQuadViews) {
+            outSourceStereo = stereoState.images[stereoSwapchain.lastReleasedIndex].Get();
+#ifdef _DEBUG
+            LogDebug("  sourceImage={:p}, lastReleasedIndex={}\n",
+                outSourceStereo, stereoSwapchain.lastReleasedIndex);
+#endif
+        }
+        outSourceFocus = focusState.images[focusSwapchain.lastReleasedIndex].Get();
+#ifdef _DEBUG
+        LogDebug("  sourceFocusImage={:p}, lastReleasedIndex={}\n",
+            outSourceFocus, focusSwapchain.lastReleasedIndex);
+#endif
+
+        // Acquire/release full FOV swapchain image.
+        // Call base class virtual method directly to bypass layer's deferred release quirk,
+        // because the full FOV swapchain is not tracked in m_swapchains.
+        if (viewIndex == 0) {
+            const uint32_t idx = acquireFullFovImage(stereoSwapchain.fullFovSwapchain, stereoState);
+            if (idx == UINT32_MAX) {
+                return false; // acquisition failed — skip this view
             }
-            sourceFocusImage = focusState.images[focusSwapchain.lastReleasedIndex];
-            LogDebug("  sourceFocusImage={:p}, lastReleasedIndex={}\n",
-                static_cast<void*>(sourceFocusImage), focusSwapchain.lastReleasedIndex);
-
-            // Acquire/release full FOV swapchain image.
-            // Call base class virtual method directly to bypass layer's deferred release quirk,
-            // because the full FOV swapchain is not tracked in m_swapchains.
-            if (viewIndex == 0) {
-                // Release previous swapchain image first (if any) to avoid call order errors.
-                // The previous image may not have been acquired yet (first frame), in which case
-                // the runtime returns XR_ERROR_CALL_ORDER_INVALID — this is expected and harmless.
-                m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr);
-
-                uint32_t acquiredImageIndex;
-                CHECK_XRCMD(m_openXrApi->OpenXrApi::xrAcquireSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr, &acquiredImageIndex));
-                XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-                waitInfo.timeout = 10000000000;
-                CHECK_XRCMD(m_openXrApi->OpenXrApi::xrWaitSwapchainImage(stereoSwapchain.fullFovSwapchain, &waitInfo));
-
-                stereoState.acquiredFullFovImageIndex = acquiredImageIndex;
-                LogDebug("  Acquired full-FOV swapchain image index={}\n", acquiredImageIndex);
-            }
-
-            populateSwapchainImagesCache(stereoState, stereoSwapchain.fullFovSwapchain, true);
-            destinationImage = stereoState.fullFovSwapchainImages[stereoState.acquiredFullFovImageIndex];
-            LogDebug("  destinationImage={:p}, acquiredIndex={}\n", static_cast<void*>(destinationImage),
-                            stereoState.acquiredFullFovImageIndex);
+#ifdef _DEBUG
+            LogDebug("  Acquired full-FOV swapchain index={}\n", idx);
+#endif
         }
 
-        // Create history textures for temporal stability if not already created
-        {
-            D3D12_RESOURCE_DESC destDesc = destinationImage->GetDesc();
-            for (uint32_t v = 0; v < xr::StereoView::Count; v++) {
-                if (!stereoState.historyImage[v]) {
-                    D3D12_HEAP_PROPERTIES heapProps{};
-                    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-                    heapProps.CreationNodeMask = heapProps.VisibleNodeMask = 1;
+        populateSwapchainImagesCache(stereoState, stereoSwapchain.fullFovSwapchain, true);
+        outDestination = stereoState.fullFovSwapchainImages[stereoState.acquiredFullFovImageIndex].Get();
+#ifdef _DEBUG
+        LogDebug("  destinationImage={:p}, acquiredIndex={}\n", outDestination,
+                        stereoState.acquiredFullFovImageIndex);
+#endif
 
-                    D3D12_RESOURCE_DESC histDesc = destDesc;
-                    histDesc.DepthOrArraySize = 1;
-                    histDesc.MipLevels = 1;
-                    histDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        // D3D12-specific: GPU sync and command list reset
+        waitForPreviousFrame(viewIndex);
+        auto& cmdList = resetCommandList(viewIndex);
+        m_currentCmdList = cmdList.Get();
+        m_currentDestination = static_cast<ID3D12Resource*>(outDestination);
+        m_frameIndex = m_currentFrameIndex;
+        m_directBoundStereo = nullptr;
+        m_directBoundFocus = nullptr;
 
-                    CHECK_HRCMD(device->CreateCommittedResource(
-                        &heapProps,
-                        D3D12_HEAP_FLAG_NONE,
-                        &histDesc,
-                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                        nullptr,
-                        IID_PPV_ARGS(stereoState.historyImage[v].ReleaseAndGetAddressOf())));
-                }
-            }
-        }
+        return true;
+    }
 
-        // Timer (optional profiling - disabled in refactored compositor)
-
-        // Wait for the frame that's 3 frames old to complete (if we've wrapped around)
-        // This ensures we don't overwrite resources that are still in use by the GPU.
-        if (m_frameFence[frameIndex]) {
-            UINT64 fenceValueToWait = m_frameFenceValue[frameIndex];
-            if (fenceValueToWait > 0 && m_frameFence[frameIndex]->GetCompletedValue() < fenceValueToWait) {
+    // =======================================================================
+    // GPU sync: wait for previous frame (view 0 only)
+    // =======================================================================
+    void D3D12Compositor::waitForPreviousFrame(uint32_t viewIndex) {
+        if (viewIndex == 0 && m_compositionFence) {
+            UINT64 fenceValueToWait = m_fenceValue;
+            if (m_compositionFence->GetCompletedValue() < fenceValueToWait) {
                 HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                m_frameFence[frameIndex]->SetEventOnCompletion(fenceValueToWait, event);
+                m_compositionFence->SetEventOnCompletion(fenceValueToWait, event);
                 WaitForSingleObject(event, INFINITE);
                 CloseHandle(event);
             }
         }
+    }
 
-        // Performance: Use cached command list to avoid per-frame CreateCommandList overhead.
-        // If Close() ever fails, we discard the cached list and recreate (self-healing).
-        CHECK_HRCMD(m_compositionAllocator[frameIndex][viewIndex]->Reset());
-        ComPtr<ID3D12GraphicsCommandList> cmdList = m_cachedCmdList[frameIndex][viewIndex];
-        if (!cmdList) {
-            CHECK_HRCMD(device->CreateCommandList(0,
-                                                  D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                  m_compositionAllocator[frameIndex][viewIndex].Get(),
-                                                  nullptr,
-                                                  IID_PPV_ARGS(cmdList.ReleaseAndGetAddressOf())));
-            m_cachedCmdList[frameIndex][viewIndex] = cmdList;
+    // =======================================================================
+    // CRTP Hook: Bind a source image directly (no flattening needed)
+    // =======================================================================
+    void D3D12Compositor::BindDirectSource(D3D12SwapchainGraphicsState& state, uint32_t targetSlot, void* sourceImage, uint32_t format) {
+        ID3D12Resource* res = static_cast<ID3D12Resource*>(sourceImage);
+        state.flatImage[targetSlot] = res;
+
+        // Track which resource is directly bound, so cleanupAndRelease can restore barriers
+        if (targetSlot < xr::StereoView::Count) {
+            m_directBoundStereo = res;
         } else {
-            // Reuse cached list - it's implicitly opened after Reset()
-            CHECK_HRCMD(cmdList->Reset(m_compositionAllocator[frameIndex][viewIndex].Get(), nullptr));
+            m_directBoundFocus = res;
         }
 
-        // Lambda: flatten source image
-        const auto flattenSourceImage = [&](ID3D12Resource* image,
-                                            const XrCompositionLayerProjectionView& view,
-                                            const SwapchainInfo& swapchainInfo,
-                                            D3D12SwapchainGraphicsState& state,
-                                            uint32_t startSlot) {
-            // Ensure flat image exists
-            if (!state.flatImage[startSlot + viewIndex] ||
-                state.flatImage[startSlot + viewIndex]->GetDesc().Width !=
-                    (UINT64)view.subImage.imageRect.extent.width ||
-                state.flatImage[startSlot + viewIndex]->GetDesc().Height !=
-                    (UINT64)view.subImage.imageRect.extent.height) {
-                D3D12_HEAP_PROPERTIES heapProps{};
-                heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-                heapProps.CreationNodeMask = heapProps.VisibleNodeMask = 1;
-
-                D3D12_RESOURCE_DESC desc{};
-                desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                desc.Alignment = 0;
-                desc.Width = view.subImage.imageRect.extent.width;
-                desc.Height = view.subImage.imageRect.extent.height;
-                desc.DepthOrArraySize = 1;
-                desc.MipLevels = 1;
-                desc.Format = (DXGI_FORMAT)swapchainInfo.createInfo.format;
-                desc.SampleDesc.Count = 1;
-                desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-                desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-                CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
-                                                            D3D12_HEAP_FLAG_NONE,
-                                                            &desc,
-                                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                            nullptr,
-                                                            IID_PPV_ARGS(state.flatImage[startSlot + viewIndex].ReleaseAndGetAddressOf())));
-            }
-
-            // Barriers: source RT->COPY_SOURCE, dest PSR->COPY_DEST.
-            //
-            // The source is the application's swapchain image, which the app leaves in the
-            // RENDER_TARGET state after drawing. We transition RENDER_TARGET -> COPY_SOURCE here
-            // and restore to RENDER_TARGET after the copy. This matches the proven-working original
-            // behavior. (The improvement plan §4.1 suggested transitioning from COMMON based on the
-            // OpenXR spec, but SteamVR's D3D11-on-D3D12 runtime does not hand over images in COMMON
-            // state, so a COMMON -> COPY_SOURCE barrier is an invalid transition that causes
-            // cmdList->Close() to return E_INVALIDARG and blanks the headset.)
-            D3D12_RESOURCE_BARRIER barriers[2];
-            barriers[0] = CD3DX12_RESOURCE_BARRIER::Transition(image,
-                                                               D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                                               D3D12_RESOURCE_STATE_COPY_SOURCE);
-            barriers[1] = CD3DX12_RESOURCE_BARRIER::Transition(state.flatImage[startSlot + viewIndex].Get(),
-                                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                               D3D12_RESOURCE_STATE_COPY_DEST);
-            cmdList->ResourceBarrier(2, barriers);
-
-            // Copy subresource region
-            D3D12_TEXTURE_COPY_LOCATION srcLocation{};
-            srcLocation.pResource = image;
-            srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            srcLocation.SubresourceIndex = view.subImage.imageArrayIndex;
-
-            D3D12_TEXTURE_COPY_LOCATION dstLocation{};
-            dstLocation.pResource = state.flatImage[startSlot + viewIndex].Get();
-            dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            dstLocation.SubresourceIndex = 0;
-
-            D3D12_BOX srcBox{};
-            srcBox.left = view.subImage.imageRect.offset.x;
-            srcBox.top = view.subImage.imageRect.offset.y;
-            srcBox.front = 0;
-            srcBox.right = srcBox.left + view.subImage.imageRect.extent.width;
-            srcBox.bottom = srcBox.top + view.subImage.imageRect.extent.height;
-            srcBox.back = 1;
-
-            cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, &srcBox);
-
-            // Restore: source COPY_SOURCE->RENDER_TARGET, dest COPY_DEST->PSR
-            barriers[0] = CD3DX12_RESOURCE_BARRIER::Transition(image,
-                                                                D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                                                D3D12_RESOURCE_STATE_RENDER_TARGET);
-            barriers[1] = CD3DX12_RESOURCE_BARRIER::Transition(state.flatImage[startSlot + viewIndex].Get(),
-                                                                D3D12_RESOURCE_STATE_COPY_DEST,
-                                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList->ResourceBarrier(2, barriers);
-        };
-
-        // Flatten images
-        if (params.useQuadViews) {
-            flattenSourceImage(sourceImage, stereoView, stereoSwapchain, stereoState, 0);
-        }
-        flattenSourceImage(sourceFocusImage, focusView, focusSwapchain, focusState, xr::StereoView::Count);
-
-        // Sharpen if needed
-        if (params.sharpenFocusView) {
-            bool isSharpenedImageNew = false;
-            if (!focusState.sharpenedImage[viewIndex] ||
-                focusState.sharpenedImage[viewIndex]->GetDesc().Width !=
-                    (UINT64)focusView.subImage.imageRect.extent.width ||
-                focusState.sharpenedImage[viewIndex]->GetDesc().Height !=
-                    (UINT64)focusView.subImage.imageRect.extent.height ||
-                focusState.sharpenedImage[viewIndex]->GetDesc().Format !=
-                    kSharpenedFormat) {
-                isSharpenedImageNew = true;
-                D3D12_HEAP_PROPERTIES heapProps{};
-                heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-                heapProps.CreationNodeMask = heapProps.VisibleNodeMask = 1;
-
-                D3D12_RESOURCE_DESC desc{};
-                desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                desc.Alignment = 0;
-                desc.Width = focusView.subImage.imageRect.extent.width;
-                desc.Height = focusView.subImage.imageRect.extent.height;
-                desc.DepthOrArraySize = 1;
-                desc.MipLevels = 1;
-                // Match the D3D11 compositor's R16G16B16A16_FLOAT to halve memory/bandwidth vs
-                // R32G32B32A32_FLOAT while preserving plenty of precision for a sharpened HDR image.
-                desc.Format = kSharpenedFormat;
-                desc.SampleDesc.Count = 1;
-                desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-                desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-                CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
-                                                            D3D12_HEAP_FLAG_NONE,
-                                                            &desc,
-                                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                            nullptr,
-                                                            IID_PPV_ARGS(focusState.sharpenedImage[viewIndex].ReleaseAndGetAddressOf())));
-            }
-
-            // Update constant buffer
-            SharpeningCSConstants sharpening{};
-            CasSetup(sharpening.Const0,
-                     sharpening.Const1,
-                     std::clamp(params.sharpenFocusView, 0.f, 1.f),
-                     (AF1)focusView.subImage.imageRect.extent.width,
-                     (AF1)focusView.subImage.imageRect.extent.height,
-                     (AF1)focusView.subImage.imageRect.extent.width,
-                     (AF1)focusView.subImage.imageRect.extent.height);
-
-            void* constData;
-            D3D12_RANGE range = {0, 0};
-            CHECK_HRCMD(m_sharpeningCSConstants[frameIndex]->Map(0, &range, &constData));
-            memcpy(constData, &sharpening, sizeof(sharpening));
-            m_sharpeningCSConstants[frameIndex]->Unmap(0, nullptr);
-
-            // Dispatch compute shader
-            cmdList->SetPipelineState(m_sharpeningPSO.Get());
-            cmdList->SetComputeRootSignature(m_sharpeningRootSignature.Get());
-            cmdList->SetDescriptorHeaps(1, m_cbvSrvHeap[frameIndex][viewIndex].GetAddressOf());
-
-            // Create SRV/UAV descriptors
-            {
-                const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-                const uint32_t srvIndex = 8 + (viewIndex * 2);
-                const uint32_t uavIndex = 9 + (viewIndex * 2);
-
-                D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                // Specify the format explicitly. The flat focus image is created with the
-                // swapchain format, so use it here instead of relying on DXGI_FORMAT_UNKNOWN
-                // (which depends on the runtime inferring the format and may not work on all drivers).
-                srvDesc.Format = (DXGI_FORMAT)focusSwapchain.createInfo.format;
-                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                srvDesc.Texture2D.MipLevels = 1;
-
-                D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-                uavDesc.Format = kSharpenedFormat;
-                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-
-                CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
-                srvHandle.Offset(srvIndex * incrementSize);
-                device->CreateShaderResourceView(focusState.flatImage[xr::StereoView::Count + viewIndex].Get(), &srvDesc, srvHandle);
-
-                CD3DX12_CPU_DESCRIPTOR_HANDLE uavHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
-                uavHandle.Offset(uavIndex * incrementSize);
-                device->CreateUnorderedAccessView(focusState.sharpenedImage[viewIndex].Get(), nullptr, &uavDesc, uavHandle);
-            }
-
-            // Bind root descriptors
-            CD3DX12_GPU_DESCRIPTOR_HANDLE csCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
-            csCbvHandle.Offset(12 * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
-            cmdList->SetComputeRootDescriptorTable(0, csCbvHandle);
-
-            CD3DX12_GPU_DESCRIPTOR_HANDLE csSrvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
-            csSrvHandle.Offset((8 + (viewIndex * 2)) * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
-            cmdList->SetComputeRootDescriptorTable(1, csSrvHandle);
-
-            CD3DX12_GPU_DESCRIPTOR_HANDLE csUavHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
-            csUavHandle.Offset((9 + (viewIndex * 2)) * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
-            cmdList->SetComputeRootDescriptorTable(2, csUavHandle);
-
-            // Barriers for compute
-            D3D12_RESOURCE_STATES sharpenedBeginState = isSharpenedImageNew
-                ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-                : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            D3D12_RESOURCE_BARRIER barriersCsIn[2];
-            barriersCsIn[0] = CD3DX12_RESOURCE_BARRIER::Transition(
-                focusState.flatImage[xr::StereoView::Count + viewIndex].Get(),
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            barriersCsIn[1] = CD3DX12_RESOURCE_BARRIER::Transition(
-                focusState.sharpenedImage[viewIndex].Get(),
-                sharpenedBeginState,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cmdList->ResourceBarrier(2, barriersCsIn);
-
-            static const int threadGroupWorkRegionDim = 16;
-            int dispatchX = (focusView.subImage.imageRect.extent.width + (threadGroupWorkRegionDim - 1)) / threadGroupWorkRegionDim;
-            int dispatchY = (focusView.subImage.imageRect.extent.height + (threadGroupWorkRegionDim - 1)) / threadGroupWorkRegionDim;
-            cmdList->Dispatch(dispatchX, dispatchY, 1);
-
-            // Restore barriers
-            D3D12_RESOURCE_BARRIER barriersCsOut[2];
-            barriersCsOut[0] = CD3DX12_RESOURCE_BARRIER::Transition(
-                focusState.flatImage[xr::StereoView::Count + viewIndex].Get(),
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            barriersCsOut[1] = CD3DX12_RESOURCE_BARRIER::Transition(
-                focusState.sharpenedImage[viewIndex].Get(),
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList->ResourceBarrier(2, barriersCsOut);
-        }
-
-        // Composite - update constant buffers (batched Map/Unmap for performance)
-        const size_t vsConstantsStride = 256;
-        const size_t psConstantsStride = 256;
-        const size_t vsOffset = viewIndex * vsConstantsStride;
-        const size_t psOffset = viewIndex * psConstantsStride;
-
-        ProjectionVSConstants projection;
+        // Transition RENDER_TARGET -> PIXEL_SHADER_RESOURCE (BarrierBatch skips no-op)
         {
-            const DirectX::XMMATRIX baseLayerViewProjection =
-                ComposeProjectionMatrix(params.cachedEyeFov, NearFar{0.1f, 20.f});
-            const DirectX::XMMATRIX layerViewProjection =
-                ComposeProjectionMatrix(focusView.fov, NearFar{0.1f, 20.f});
-
-            DirectX::XMStoreFloat4x4(
-                &projection.focusProjection,
-                DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, baseLayerViewProjection) *
-                                           layerViewProjection));
+            utils::d3d12::BarrierBatch barriers(m_currentCmdList);
+            barriers.Add(res, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
+    }
+
+    // =======================================================================
+    // CRTP Hook: Check if flat image needs reallocation
+    // =======================================================================
+    bool D3D12Compositor::NeedsFlatReallocate(D3D12SwapchainGraphicsState& state, uint32_t targetSlot, uint32_t width, uint32_t height, uint32_t format) {
+        return NeedsReallocate(state.flatImage[targetSlot].Get(), width, height, format);
+    }
+
+    // =======================================================================
+    // CRTP Hook: Create flat image with correct dimensions
+    // =======================================================================
+    void D3D12Compositor::CreateFlatImage(D3D12SwapchainGraphicsState& state, uint32_t targetSlot, uint32_t width, uint32_t height, uint32_t format) {
+        auto device = m_device.Get();
+
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+        heapProps.CreationNodeMask = heapProps.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Alignment = 0;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = (DXGI_FORMAT)format;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
+                                                    D3D12_HEAP_FLAG_NONE,
+                                                    &desc,
+                                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                    nullptr,
+                                                    IID_PPV_ARGS(state.flatImage[targetSlot].ReleaseAndGetAddressOf())));
+    }
+
+    // =======================================================================
+    // CRTP Hook: Copy sub-image region from source to flat image
+    // =======================================================================
+    void D3D12Compositor::CopySubImage(D3D12SwapchainGraphicsState& state, uint32_t targetSlot, void* sourceImage, const XrCompositionLayerProjectionView& view) {
+        ID3D12Resource* src = static_cast<ID3D12Resource*>(sourceImage);
+        ID3D12Resource* dst = state.flatImage[targetSlot].Get();
+
+        // Barriers: source RT->COPY_SOURCE, dest PSR->COPY_DEST
+        {
+            utils::d3d12::BarrierBatch barriers(m_currentCmdList);
+            barriers.Add(src, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            barriers.Add(dst, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+
+        // Copy subresource region
+        D3D12_TEXTURE_COPY_LOCATION srcLocation{};
+        srcLocation.pResource = src;
+        srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        srcLocation.SubresourceIndex = view.subImage.imageArrayIndex;
+
+        D3D12_TEXTURE_COPY_LOCATION dstLocation{};
+        dstLocation.pResource = dst;
+        dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLocation.SubresourceIndex = 0;
+
+        D3D12_BOX srcBox{};
+        srcBox.left = view.subImage.imageRect.offset.x;
+        srcBox.top = view.subImage.imageRect.offset.y;
+        srcBox.front = 0;
+        srcBox.right = srcBox.left + view.subImage.imageRect.extent.width;
+        srcBox.bottom = srcBox.top + view.subImage.imageRect.extent.height;
+        srcBox.back = 1;
+
+        m_currentCmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, &srcBox);
+
+        // Restore: source COPY_SOURCE->RT, dest COPY_DEST->PSR
+        {
+            utils::d3d12::BarrierBatch barriers(m_currentCmdList);
+            barriers.Add(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            barriers.Add(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+    }
+
+    // =======================================================================
+    // CRTP Hook: Stage 3 - Run the CAS sharpening compute pass
+    // =======================================================================
+    void D3D12Compositor::sharpenFocusView(
+            const CompositorParams& params,
+            const XrCompositionLayerProjectionView& focusView,
+            const SwapchainInfo& focusSwapchain,
+            D3D12SwapchainGraphicsState& focusState) {
+        auto device = m_device.Get();
+        const uint32_t viewIndex = params.viewIndex;
+        auto cmdList = m_currentCmdList;
+        const uint32_t frameIndex = m_frameIndex;
+
+        const uint32_t sharpWidth = (uint32_t)focusView.subImage.imageRect.extent.width;
+        const uint32_t sharpHeight = (uint32_t)focusView.subImage.imageRect.extent.height;
+        const uint32_t sharpFormat = (uint32_t)kSharpenedFormat;
+
+        if (NeedsReallocate(focusState.sharpenedImage[viewIndex].Get(),
+                             sharpWidth, sharpHeight, sharpFormat)) {
+            D3D12_HEAP_PROPERTIES heapProps{};
+            heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+            heapProps.CreationNodeMask = heapProps.VisibleNodeMask = 1;
+
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            desc.Alignment = 0;
+            desc.Width = focusView.subImage.imageRect.extent.width;
+            desc.Height = focusView.subImage.imageRect.extent.height;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.Format = kSharpenedFormat;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+            CHECK_HRCMD(device->CreateCommittedResource(&heapProps,
+                                                        D3D12_HEAP_FLAG_NONE,
+                                                        &desc,
+                                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                        nullptr,
+                                                        IID_PPV_ARGS(focusState.sharpenedImage[viewIndex].ReleaseAndGetAddressOf())));
+        }
+
+        // Update constant buffer using SharpeningPass (using per-frame resource, Item 9)
+        SharpeningCSConstants sharpening{};
+        SharpeningPass{}.PrepareConstants(sharpening, params.sharpenFocusView,
+                                          focusView.subImage.imageRect.extent.width,
+                                          focusView.subImage.imageRect.extent.height);
+
+        void* constData;
+        D3D12_RANGE range = {0, 0};
+        CHECK_HRCMD(m_sharpeningCSConstants[frameIndex]->Map(0, &range, &constData));
+        memcpy(constData, &sharpening, sizeof(sharpening));
+        m_sharpeningCSConstants[frameIndex]->Unmap(0, nullptr);
+
+        // Dispatch compute shader
+        cmdList->SetPipelineState(m_sharpeningPSO.Get());
+        cmdList->SetComputeRootSignature(m_sharpeningRootSignature.Get());
+        cmdList->SetDescriptorHeaps(1, m_cbvSrvHeap[frameIndex][viewIndex].GetAddressOf());
+
+        // --- DESCRIPTOR CACHING LOGIC ---
+        // Cache SRV/UAV descriptors in a per-state CPU heap to avoid per-frame
+        // CreateShaderResourceView / CreateUnorderedAccessView overhead.
+        ID3D12Resource* flatFocusRes = focusState.flatImage[xr::StereoView::Count + viewIndex].Get();
+        ID3D12Resource* sharpenedRes = focusState.sharpenedImage[viewIndex].Get();
+
+        // Check if we need to (re)create the cached descriptors
+        if (!focusState.srvUavCached ||
+            focusState.cachedFlatFocusAddr != (uint64_t)flatFocusRes ||
+            focusState.cachedSharpenedAddr != (uint64_t)sharpenedRes) {
+
+            if (!focusState.cpuSrvUavHeap) {
+                D3D12_DESCRIPTOR_HEAP_DESC cpuHeapDesc{};
+                cpuHeapDesc.NumDescriptors = 2; // 1 SRV + 1 UAV
+                cpuHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+                cpuHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+                CHECK_HRCMD(device->CreateDescriptorHeap(&cpuHeapDesc,
+                    IID_PPV_ARGS(focusState.cpuSrvUavHeap.ReleaseAndGetAddressOf())));
+            }
+
+            const auto cpuIncSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            CD3DX12_CPU_DESCRIPTOR_HANDLE cpuSrvHandle(focusState.cpuSrvUavHeap->GetCPUDescriptorHandleForHeapStart(), 0, cpuIncSize);
+            CD3DX12_CPU_DESCRIPTOR_HANDLE cpuUavHandle(focusState.cpuSrvUavHeap->GetCPUDescriptorHandleForHeapStart(), 1, cpuIncSize);
+
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Format = (DXGI_FORMAT)focusSwapchain.createInfo.format;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(flatFocusRes, &srvDesc, cpuSrvHandle);
+
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = kSharpenedFormat;
+            uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            device->CreateUnorderedAccessView(sharpenedRes, nullptr, &uavDesc, cpuUavHandle);
+
+            focusState.cachedFlatFocusAddr = (uint64_t)flatFocusRes;
+            focusState.cachedSharpenedAddr = (uint64_t)sharpenedRes;
+            focusState.srvUavCached = true;
+        }
+
+        // Copy cached descriptors to the GPU-visible heap using DescriptorLayout
+        const auto gpuIncSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE cpuSrcSrv(focusState.cpuSrvUavHeap->GetCPUDescriptorHandleForHeapStart(), 0, gpuIncSize);
+        CD3DX12_CPU_DESCRIPTOR_HANDLE cpuSrcUav(focusState.cpuSrvUavHeap->GetCPUDescriptorHandleForHeapStart(), 1, gpuIncSize);
+
+        device->CopyDescriptorsSimple(1,
+            DescriptorLayout::CpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kSharpenSrv, gpuIncSize),
+            cpuSrcSrv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        device->CopyDescriptorsSimple(1,
+            DescriptorLayout::CpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kSharpenUav, gpuIncSize),
+            cpuSrcUav, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        // Bind root descriptors using DescriptorLayout
+        const auto descInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        cmdList->SetComputeRootDescriptorTable(0,
+            DescriptorLayout::GpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kSharpenCbv, descInc));
+        cmdList->SetComputeRootDescriptorTable(1,
+            DescriptorLayout::GpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kSharpenSrv, descInc));
+        cmdList->SetComputeRootDescriptorTable(2,
+            DescriptorLayout::GpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kSharpenUav, descInc));
+
+        // Barriers for compute
+        {
+            utils::d3d12::BarrierBatch barriers(cmdList);
+            barriers.Add(focusState.flatImage[xr::StereoView::Count + viewIndex].Get(),
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            barriers.Add(focusState.sharpenedImage[viewIndex].Get(),
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
+        // Compute dispatch dimensions using SharpeningPass
+        SharpeningPass sharpeningPass;
+        sharpeningPass(params, focusView, focusSwapchain);
+        cmdList->Dispatch(sharpeningPass.dispatchX, sharpeningPass.dispatchY, 1);
+
+        // Restore barriers
+        {
+            utils::d3d12::BarrierBatch barriers(cmdList);
+            barriers.Add(focusState.flatImage[xr::StereoView::Count + viewIndex].Get(),
+                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            barriers.Add(focusState.sharpenedImage[viewIndex].Get(),
+                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+    }
+
+    // =======================================================================
+    // CRTP Hook: Stage 4 - Render the projection pass
+    // =======================================================================
+    void D3D12Compositor::renderProjection(
+            const CompositorParams& params,
+            const XrCompositionLayerProjectionView& focusView,
+            const SwapchainInfo& stereoSwapchain,
+            const SwapchainInfo& focusSwapchain,
+            D3D12SwapchainGraphicsState& stereoState,
+            D3D12SwapchainGraphicsState& focusState,
+            void* destination) {
+        auto device = m_device.Get();
+        const uint32_t viewIndex = params.viewIndex;
+        auto cmdList = m_currentCmdList;
+        const uint32_t frameIndex = m_frameIndex;
+        ID3D12Resource* destRes = static_cast<ID3D12Resource*>(destination);
+
+        // Update constant buffers using typed writers
+        ProjectionVSConstants projection{};
+        ComputeProjectionConstants(projection, params.cachedEyeFov, focusView.fov);
+        projection.stereoSubRect = {0, 0, 0, 0};
+        projection.focusSubRect = {0, 0, 0, 0};
+        projection.stereoSwapchainSize = {0, 0};
+        projection.focusSwapchainSize = {0, 0};
 
         ProjectionPSConstants drawing{};
-        drawing.smoothingArea = params.useQuadViews ? params.smoothenFocusViewEdges : 0;
-        drawing.ignoreAlpha = ~(params.layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
-        drawing.isUnpremultipliedAlpha = params.layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-        drawing.debugFocusView = params.debugFocusView;
-        drawing.sharpenFocusView = params.sharpenFocusView;
-        drawing.chromaticAberrationCorrection = params.chromaticAberrationCorrection;
-        drawing.frameCount = params.frameCount;
+        ComputePixelShaderConstants(drawing, params);
+        drawing.stereoSubRect = {0, 0, 0, 0};
+        drawing.focusSubRect = {0, 0, 0, 0};
+        drawing.stereoSwapchainSize = {0, 0};
+        drawing.focusSwapchainSize = {0, 0};
+        drawing.useDirectStereoSampling = false;
+        drawing.useDirectFocusSampling = false;
 
-        // Performance: Batch both constant buffer updates into a single Map/Unmap pair
-        void* vsConstData;
-        void* psConstData;
-        D3D12_RANGE range = {0, 0};
-        CHECK_HRCMD(m_projectionVSConstants[frameIndex]->Map(0, &range, &vsConstData));
-        CHECK_HRCMD(m_projectionPSConstants[frameIndex]->Map(0, &range, &psConstData));
-        memcpy((uint8_t*)vsConstData + vsOffset, &projection, sizeof(projection));
-        memcpy((uint8_t*)psConstData + psOffset, &drawing, sizeof(drawing));
-        m_projectionVSConstants[frameIndex]->Unmap(0, nullptr);
-        m_projectionPSConstants[frameIndex]->Unmap(0, nullptr);
-
-        // Create per-eye CBV descriptors (per-frame)
-        {
-            const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            const uint32_t vsCbvIndex = viewIndex * 2;
-            const uint32_t psCbvIndex = viewIndex * 2 + 1;
-
-            D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
-            cbvDesc.SizeInBytes = 256;
-
-            CD3DX12_CPU_DESCRIPTOR_HANDLE vsCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
-            vsCbvHandle.Offset(vsCbvIndex * incrementSize);
-            cbvDesc.BufferLocation = m_projectionVSConstants[frameIndex]->GetGPUVirtualAddress() + vsOffset;
-            device->CreateConstantBufferView(&cbvDesc, vsCbvHandle);
-
-            CD3DX12_CPU_DESCRIPTOR_HANDLE psCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
-            psCbvHandle.Offset(psCbvIndex * incrementSize);
-            cbvDesc.BufferLocation = m_projectionPSConstants[frameIndex]->GetGPUVirtualAddress() + psOffset;
-            device->CreateConstantBufferView(&cbvDesc, psCbvHandle);
-        }
+        m_vsConstantWriters[frameIndex].writeVS(viewIndex, projection);
+        m_psConstantWriters[frameIndex].writePS(viewIndex, drawing);
 
         // Transition destination to render target
         {
-            D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-                destinationImage,
-                D3D12_RESOURCE_STATE_PRESENT,
-                D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cmdList->ResourceBarrier(1, &barrier);
+            utils::d3d12::BarrierBatch barriers(cmdList);
+            barriers.Add(destRes, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
 
-        // Set up render target
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        DXGI_FORMAT rtFormat = (DXGI_FORMAT)stereoSwapchain.createInfo.format;
-        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
-        rtvDesc.Format = rtFormat;
-        rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
-        rtvDesc.Texture2DArray.ArraySize = 1;
-        rtvDesc.Texture2DArray.FirstArraySlice = viewIndex;
-        device->CreateRenderTargetView(destinationImage, &rtvDesc, rtvHandle);
+        // Set up render target using RTV cache helper
+        const auto rtvHandle = getOrCreateRTV(stereoState, destRes, viewIndex,
+                                              (DXGI_FORMAT)stereoSwapchain.createInfo.format);
         cmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
         D3D12_VIEWPORT viewport{};
@@ -829,58 +767,9 @@ namespace openxr_api_layer {
         D3D12_RECT scissor = {0, 0, (LONG)params.fullFovResolution.width, (LONG)params.fullFovResolution.height};
         cmdList->RSSetScissorRects(1, &scissor);
 
-        // Create SRVs for source textures (per-frame)
-        ID3D12Resource* stereoTex = nullptr;
-        ID3D12Resource* focusTex = nullptr;
-        ID3D12Resource* historyTex = nullptr;
-        {
-            const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            const uint32_t srvBase = 4 + (viewIndex * 4);
-            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srvDesc.Texture2D.MipLevels = 1;
-
-            CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetCPUDescriptorHandleForHeapStart());
-            srvHandle.Offset(srvBase * incrementSize);
-            // Flat images are created with the swapchain format; specify it explicitly instead
-            // of DXGI_FORMAT_UNKNOWN so the format does not depend on driver inference.
-            srvDesc.Format = (DXGI_FORMAT)stereoSwapchain.createInfo.format;
-            if (params.useQuadViews && stereoState.flatImage[viewIndex]) {
-                stereoTex = stereoState.flatImage[viewIndex].Get();
-                device->CreateShaderResourceView(stereoTex, &srvDesc, srvHandle);
-            } else {
-                stereoTex = focusState.flatImage[xr::StereoView::Count + viewIndex].Get();
-                device->CreateShaderResourceView(stereoTex, &srvDesc, srvHandle);
-            }
-
-            srvHandle.Offset(incrementSize);
-            if (params.sharpenFocusView && focusState.sharpenedImage[viewIndex]) {
-                focusTex = focusState.sharpenedImage[viewIndex].Get();
-                // The sharpened image uses kSharpenedFormat, not the swapchain format.
-                srvDesc.Format = kSharpenedFormat;
-            } else if (params.useQuadViews) {
-                focusTex = focusState.flatImage[xr::StereoView::Count + viewIndex].Get();
-                srvDesc.Format = (DXGI_FORMAT)focusSwapchain.createInfo.format;
-            } else {
-                focusTex = m_blankTexture.Get();
-                // The blank texture is created as B8G8R8A8_UNORM (see initialize()).
-                srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            }
-            device->CreateShaderResourceView(focusTex, &srvDesc, srvHandle);
-
-            // Bind History Texture SRV (t2)
-            srvHandle.Offset(incrementSize);
-            historyTex = stereoState.historyImage[viewIndex].Get();
-            if (historyTex) {
-                srvDesc.Format = (DXGI_FORMAT)stereoSwapchain.createInfo.format;
-                device->CreateShaderResourceView(historyTex, &srvDesc, srvHandle);
-            } else {
-                historyTex = m_blankTexture.Get();
-                srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                device->CreateShaderResourceView(historyTex, &srvDesc, srvHandle);
-            }
-        }
+        // Bind SRVs for source textures
+        bindProjectionSRVs(params, stereoSwapchain, focusView, focusSwapchain,
+                           stereoState, focusState, frameIndex);
 
         // Bind and draw
         cmdList->SetPipelineState(m_projectionPSO.Get());
@@ -888,114 +777,230 @@ namespace openxr_api_layer {
         ID3D12DescriptorHeap* heaps[2] = {m_cbvSrvHeap[frameIndex][viewIndex].Get(), m_samplerHeap.Get()};
         cmdList->SetDescriptorHeaps(2, heaps);
 
-        const uint32_t vsCbvIndex = viewIndex * 2;
-        const uint32_t psCbvIndex = viewIndex * 2 + 1;
         const auto descInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE vsCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
-        vsCbvHandle.Offset(vsCbvIndex * descInc);
-        cmdList->SetGraphicsRootDescriptorTable(0, vsCbvHandle);
-
-        CD3DX12_GPU_DESCRIPTOR_HANDLE psCbvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
-        psCbvHandle.Offset(psCbvIndex * descInc);
-        cmdList->SetGraphicsRootDescriptorTable(1, psCbvHandle);
-
+        cmdList->SetGraphicsRootDescriptorTable(0,
+            DescriptorLayout::GpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::VsCbv(viewIndex), descInc));
+        cmdList->SetGraphicsRootDescriptorTable(1,
+            DescriptorLayout::GpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::PsCbv(viewIndex), descInc));
         cmdList->SetGraphicsRootDescriptorTable(2, m_samplerHeap->GetGPUDescriptorHandleForHeapStart());
-
-        const uint32_t srvBase = 4 + (viewIndex * 4);
-        CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap[frameIndex][viewIndex]->GetGPUDescriptorHandleForHeapStart());
-        srvHandle.Offset(srvBase * descInc);
-        cmdList->SetGraphicsRootDescriptorTable(3, srvHandle);
+        cmdList->SetGraphicsRootDescriptorTable(3,
+            DescriptorLayout::GpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kStereoSrv, descInc));
 
         cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         cmdList->DrawInstanced(3, 1, 0, 0);
+    }
+
+    // =======================================================================
+    // Helper: bind SRVs for the projection pass
+    // =======================================================================
+    void D3D12Compositor::bindProjectionSRVs(
+            const CompositorParams& params,
+            const SwapchainInfo& stereoSwapchain,
+            const XrCompositionLayerProjectionView& focusView,
+            const SwapchainInfo& focusSwapchain,
+            D3D12SwapchainGraphicsState& stereoState,
+            D3D12SwapchainGraphicsState& focusState,
+            uint32_t frameIndex) {
+        auto device = m_device.Get();
+        const uint32_t viewIndex = params.viewIndex;
+
+        const auto incrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+
+        // Stereo SRV (slot kStereoSrv)
+        ID3D12Resource* stereoTex = nullptr;
+        srvDesc.Format = (DXGI_FORMAT)stereoSwapchain.createInfo.format;
+        if (params.useQuadViews && stereoState.flatImage[viewIndex]) {
+            stereoTex = stereoState.flatImage[viewIndex].Get();
+        } else {
+            stereoTex = focusState.flatImage[xr::StereoView::Count + viewIndex].Get();
+        }
+        device->CreateShaderResourceView(stereoTex, &srvDesc,
+            DescriptorLayout::CpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kStereoSrv, incrementSize));
+
+        // Focus SRV (slot kFocusSrv)
+        srvDesc.Format = (DXGI_FORMAT)focusSwapchain.createInfo.format;
+        ID3D12Resource* focusTex = nullptr;
+        if (params.sharpenFocusView && focusState.sharpenedImage[viewIndex]) {
+            focusTex = focusState.sharpenedImage[viewIndex].Get();
+            srvDesc.Format = kSharpenedFormat;
+        } else if (params.useQuadViews) {
+            focusTex = focusState.flatImage[xr::StereoView::Count + viewIndex].Get();
+        } else {
+            focusTex = m_blankTexture.Get();
+            srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        }
+        device->CreateShaderResourceView(focusTex, &srvDesc,
+            DescriptorLayout::CpuHandle(m_cbvSrvHeap[frameIndex][viewIndex].Get(), DescriptorLayout::kFocusSrv, incrementSize));
+    }
+
+    // =======================================================================
+    // Helper: get or create cached RTV handle
+    // =======================================================================
+    D3D12_CPU_DESCRIPTOR_HANDLE D3D12Compositor::getOrCreateRTV(
+            D3D12SwapchainGraphicsState& state,
+            ID3D12Resource* destination,
+            uint32_t arraySlice,
+            DXGI_FORMAT format) {
+        auto device = m_device.Get();
+
+        const RtvCacheKey key{destination, arraySlice};
+        auto it = state.rtvCache.find(key);
+        if (it != state.rtvCache.end()) {
+            return it->second;
+        }
+
+        // Guard against heap overflow (8 descriptors max)
+        if (state.rtvCache.size() >= 8) {
+            LogWarning("D3D12: RTV heap exhausted (8/8). Clearing cache.\n");
+            state.rtvCache.clear();
+        }
+
+        const auto rtvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
+        rtvHandle.Offset((INT)state.rtvCache.size() * (INT)rtvInc);
+
+        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = format;
+        rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtvDesc.Texture2DArray.ArraySize = 1;
+        rtvDesc.Texture2DArray.FirstArraySlice = arraySlice;
+        device->CreateRenderTargetView(destination, &rtvDesc, rtvHandle);
+
+        state.rtvCache[key] = rtvHandle;
+        return rtvHandle;
+    }
+
+    // =======================================================================
+    // CRTP Hook: Stage 5 - Cleanup, restore barriers, submit, and sync
+    //
+    // CRITICAL: ExecuteCommandLists expects an array of pointers
+    // (ID3D12CommandList* const*). Passing the command list pointer directly
+    // via a reinterpret_cast causes the runtime to read the object's vtable
+    // as memory addresses, leading to immediate device removal.
+    // =======================================================================
+    void D3D12Compositor::cleanupAndRelease(
+            const CompositorParams& params,
+            D3D12SwapchainGraphicsState& stereoState) {
+        auto queue = m_queue.Get();
+        const uint32_t viewIndex = params.viewIndex;
+        auto cmdList = m_currentCmdList;
+        auto destination = m_currentDestination;
+
+        // Restore directly bound images to RENDER_TARGET before closing
+        {
+            utils::d3d12::BarrierBatch barriers(cmdList);
+            if (m_directBoundStereo)
+                barriers.Add(m_directBoundStereo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (m_directBoundFocus)
+                barriers.Add(m_directBoundFocus, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
 
         // Transition destination to present
         {
-            D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-                destinationImage,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
-                D3D12_RESOURCE_STATE_PRESENT);
-            cmdList->ResourceBarrier(1, &barrier);
+            utils::d3d12::BarrierBatch barriers(cmdList);
+            barriers.Add(destination, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         }
 
-        HRESULT hr = cmdList->Close();
-        if (FAILED(hr)) {
-            // Close() failed - discard cached list so it gets recreated next frame (self-healing)
-            m_cachedCmdList[frameIndex][viewIndex].Reset();
-            CHECK_HRCMD(hr);
-        }
-        queue->ExecuteCommandLists(1, reinterpret_cast<ID3D12CommandList* const*>(cmdList.GetAddressOf()));
+        CHECK_HRCMD(cmdList->Close());
 
-        // Timer stop (optional profiling - disabled in refactored compositor)
+        // SAFE EXECUTION: Pass a stack array of pointers, NOT a casted pointer.
+        ID3D12CommandList* const ppCommandLists[] = { cmdList };
+        queue->ExecuteCommandLists(1, ppCommandLists);
 
-        // Signal frame fence and advance frame index (view 1 only)
+        // Signal fence and wait (view 1 only)
         if (viewIndex == xr::StereoView::Right) {
-            m_frameFenceValue[frameIndex]++;
-            queue->Signal(m_frameFence[frameIndex].Get(), m_frameFenceValue[frameIndex]);
-            
-            // Also signal global composition fence for external synchronization
             m_fenceValue++;
             queue->Signal(m_compositionFence.Get(), m_fenceValue);
-            
-            // Advance to next frame in the pipeline
             m_currentFrameIndex = (m_currentFrameIndex + 1) % kFrameCount;
+            m_cmdListIndex++;
 
-            LogDebug("  D3D12 composition complete (frame={}, fence={})\n", frameIndex, m_fenceValue);
+            if (m_compositionFence->GetCompletedValue() < m_fenceValue) {
+                HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                m_compositionFence->SetEventOnCompletion(m_fenceValue, event);
+                WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+            }
+#ifdef _DEBUG
+            LogDebug("  D3D12 composition complete (fence={})\n", m_fenceValue);
+#endif
 
             // Call base class virtual method directly to bypass layer's deferred release quirk
-            const XrResult releaseResult =
-                m_openXrApi->OpenXrApi::xrReleaseSwapchainImage(stereoSwapchain.fullFovSwapchain, nullptr);
-            if (XR_FAILED(releaseResult)) {
-                LogWarning("D3D12: xrReleaseSwapchainImage (full FOV) failed: {}\n", xr::ToCString(releaseResult));
-            }
+            releaseFullFovImage(stereoState);
         }
 
-        return destinationImage;
+        // Reset tracking members for next frame
+        m_currentCmdList = nullptr;
+        m_currentDestination = nullptr;
+        m_directBoundStereo = nullptr;
+        m_directBoundFocus = nullptr;
+    }
+
+    // =======================================================================
+    // Helper: reset command allocator and acquire command list
+    // =======================================================================
+    ComPtr<ID3D12GraphicsCommandList>& D3D12Compositor::resetCommandList(uint32_t viewIndex) {
+        auto device = m_device.Get();
+
+        CHECK_HRCMD(m_compositionAllocator[viewIndex]->Reset());
+
+        const uint32_t listSlot = m_cmdListIndex % 2;
+        ComPtr<ID3D12GraphicsCommandList>& cmdList = m_cmdList[viewIndex][listSlot];
+
+        if (!cmdList) {
+            HRESULT hr = device->CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                m_compositionAllocator[viewIndex].Get(), nullptr,
+                IID_PPV_ARGS(cmdList.ReleaseAndGetAddressOf()));
+            if (FAILED(hr)) {
+                HRESULT removedReason = device->GetDeviceRemovedReason();
+                LogError("D3D12: CreateCommandList failed: {:#x}, DeviceRemovedReason: {:#x}\n",
+                         (uint32_t)hr, (uint32_t)removedReason);
+                // Common reasons:
+                //   0x887A0006 = DXGI_ERROR_DEVICE_HUNG (TDR — GPU took too long)
+                //   0x887A0005 = DXGI_ERROR_DEVICE_REMOVED (driver crash / resource conflict)
+                //   0x887A0020 = DXGI_ERROR_DEVICE_RESET (driver update / TDR)
+                //   0x887A0021 = DXGI_ERROR_DEVICE_REMOVED (DXGI_ERROR_INVALID_CALL from debug layer)
+                // FIX: Throw a standard exception so the dispatcher's catch(std::exception&)
+                // can safely catch it and log the error context.
+                throw std::runtime_error(fmt::format(
+                    "D3D12 CreateCommandList failed: 0x{:08X}, DeviceRemoved: 0x{:08X}",
+                    static_cast<uint32_t>(hr),
+                    static_cast<uint32_t>(removedReason)));
+            }
+        } else {
+            CHECK_HRCMD(cmdList->Reset(m_compositionAllocator[viewIndex].Get(), nullptr));
+        }
+        return cmdList;
     }
 
     void D3D12Compositor::destroy() {
+        // FIX: Skip all cleanup during DLL unload. The process is exiting and the app's D3D12
+        // device/queue may already be dead. Calling Release() or Unmap() would crash.
+        // The OS reclaims all memory on exit anyway.
+        if (g_isUnloading) {
+            return;
+        }
+
         // FIX: Wait for GPU to finish all composition work before releasing anything.
-        // Without this, the GPU might execute commands referencing resources we are about to free.
         if (m_queue && m_compositionFence) {
             m_fenceValue++;
             CHECK_HRCMD(m_queue->Signal(m_compositionFence.Get(), m_fenceValue));
             if (m_compositionFence->GetCompletedValue() < m_fenceValue) {
                 HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
                 CHECK_HRCMD(m_compositionFence->SetEventOnCompletion(m_fenceValue, event));
-                // Use timeout to prevent infinite hangs, but still wait for completion
                 WaitForSingleObject(event, 5000); // 5-second timeout to prevent infinite hangs
                 CloseHandle(event);
             }
         }
 
-        // Also wait for all frame fences
-        for (uint32_t f = 0; f < kFrameCount; f++) {
-            if (m_queue && m_frameFence[f]) {
-                m_frameFenceValue[f]++;
-                CHECK_HRCMD(m_queue->Signal(m_frameFence[f].Get(), m_frameFenceValue[f]));
-                if (m_frameFence[f]->GetCompletedValue() < m_frameFenceValue[f]) {
-                    HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                    CHECK_HRCMD(m_frameFence[f]->SetEventOnCompletion(m_frameFenceValue[f], event));
-                    WaitForSingleObject(event, 5000);
-                    CloseHandle(event);
-                }
-            }
-        }
-
         // Idempotent: safe to call multiple times (ComPtr::Reset() is a no-op on already-null pointers).
         m_swapchainStates.clear();
-        for (uint32_t f = 0; f < kFrameCount; f++) {
-            for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
-                m_cbvSrvHeap[f][i].Reset();
-                m_compositionAllocator[f][i].Reset();
-                m_cachedCmdList[f][i].Reset();
-            }
-            m_projectionVSConstants[f].Reset();
-            m_projectionPSConstants[f].Reset();
-            m_sharpeningCSConstants[f].Reset();
-            m_frameFence[f].Reset();
-        }
+        m_cpuCbvSrvHeap.Reset();
         m_rtvHeap.Reset();
         m_samplerHeap.Reset();
         m_projectionPSO.Reset();
@@ -1003,10 +1008,32 @@ namespace openxr_api_layer {
         m_projectionRootSignature.Reset();
         m_sharpeningRootSignature.Reset();
         m_blankTexture.Reset();
+        m_compositionAllocator[0].Reset();
+        m_compositionAllocator[1].Reset();
         m_compositionFence.Reset();
+
+        // FIX (Item 10): Unmap persistently mapped resources before resetting
+        for (uint32_t f = 0; f < kFrameCount; f++) {
+            if (m_projectionVSConstants[f]) {
+                m_projectionVSConstants[f]->Unmap(0, nullptr);
+            }
+            if (m_projectionPSConstants[f]) {
+                m_projectionPSConstants[f]->Unmap(0, nullptr);
+            }
+            m_projectionVSConstants[f].Reset();
+            m_projectionPSConstants[f].Reset();
+            m_sharpeningCSConstants[f].Reset();
+            m_cbvSrvHeap[f][0].Reset();
+            m_cbvSrvHeap[f][1].Reset();
+        }
     }
 
     void D3D12Compositor::waitForGpuIdle() {
+        // FIX: Skip GPU sync during DLL unload.
+        if (g_isUnloading) {
+            return;
+        }
+
         if (m_queue && m_compositionFence) {
             m_fenceValue++;
             CHECK_HRCMD(m_queue->Signal(m_compositionFence.Get(), m_fenceValue));

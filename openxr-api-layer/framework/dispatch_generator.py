@@ -162,7 +162,7 @@ namespace openxr_api_layer
 	XrResult XRAPI_CALL {cur_cmd.name}({parameters_list})
 	{{
 		TraceLocalActivity(local);
-		TraceLoggingWriteStart(local, "{cur_cmd.name}");
+		QVF_TRACE_START(local, "{cur_cmd.name}");
 
 		XrResult result;
 		try
@@ -171,12 +171,18 @@ namespace openxr_api_layer
 		}}
 		catch (std::exception& exc)
 		{{
-			TraceLoggingWriteTagged(local, "{cur_cmd.name}_Error", TLArg(exc.what(), "Error"));
+			QVF_TRACE_TAGGED(local, "{cur_cmd.name}_Error", TLArg(exc.what(), "Error"));
 			ErrorLog(fmt::format("{cur_cmd.name}: {{}}\\n", exc.what()));
 			result = XR_ERROR_RUNTIME_FAILURE;
 		}}
+		catch (...)
+		{{
+			QVF_TRACE_TAGGED(local, "{cur_cmd.name}_Error", TLArg("Unknown exception", "Error"));
+			ErrorLog(fmt::format("{cur_cmd.name}: Unknown exception\\n"));
+			result = XR_ERROR_RUNTIME_FAILURE;
+		}}
 
-		TraceLoggingWriteStop(local, "{cur_cmd.name}", TLArg(xr::ToCString(result), "Result"));
+		QVF_TRACE_STOP(local, "{cur_cmd.name}", TLArg(xr::ToCString(result), "Result"));
 		if (XR_FAILED(result)) {{
 			ErrorLog(fmt::format("{cur_cmd.name} failed with {{}}\\n", xr::ToCString(result)));
 		}}
@@ -199,6 +205,11 @@ namespace openxr_api_layer
 		{{
 			TraceLoggingWriteTagged(local, "{cur_cmd.name}_Error", TLArg(exc.what(), "Error"));
 			ErrorLog(fmt::format("{cur_cmd.name}: {{}}\\n", exc.what()));
+		}}
+		catch (...)
+		{{
+			TraceLoggingWriteTagged(local, "{cur_cmd.name}_Error", TLArg("Unknown exception", "Error"));
+			ErrorLog(fmt::format("{cur_cmd.name}: Unknown exception\\n"));
 		}}
 
 		TraceLoggingWriteStop(local, "{cur_cmd.name}"));
@@ -330,6 +341,52 @@ namespace openxr_api_layer
 		void SetGrantedExtensions(const std::vector<std::string>& grantedExtensions)
 		{
 			m_grantedExtensions = grantedExtensions;
+		}
+
+		// Testing helpers: populate dispatch-table function pointers so that qualified
+		// base-class calls (openXrApi->OpenXrApi::xrWaitFrame(...)) forward to a mock.
+		void setDispatchTableForTesting(
+			PFN_xrWaitFrame pfnWaitFrame,
+			PFN_xrBeginFrame pfnBeginFrame,
+			PFN_xrEndFrame pfnEndFrame,
+			PFN_xrDestroySwapchain pfnDestroySwapchain,
+			PFN_xrReleaseSwapchainImage pfnReleaseSwapchainImage)
+		{
+			m_xrWaitFrame = pfnWaitFrame;
+			m_xrBeginFrame = pfnBeginFrame;
+			m_xrEndFrame = pfnEndFrame;
+			m_xrDestroySwapchain = pfnDestroySwapchain;
+			m_xrReleaseSwapchainImage = pfnReleaseSwapchainImage;
+		}
+
+		void setDispatchTableForTestingEx(
+			PFN_xrCreateReferenceSpace pfnCreateReferenceSpace,
+			PFN_xrDestroySpace pfnDestroySpace,
+			PFN_xrLocateSpace pfnLocateSpace,
+			PFN_xrStringToPath pfnStringToPath,
+			PFN_xrSuggestInteractionProfileBindings pfnSuggestInteractionProfileBindings,
+			PFN_xrAttachSessionActionSets pfnAttachSessionActionSets,
+			PFN_xrSyncActions pfnSyncActions,
+			PFN_xrPollEvent pfnPollEvent)
+		{
+			m_xrCreateReferenceSpace = pfnCreateReferenceSpace;
+			m_xrDestroySpace = pfnDestroySpace;
+			m_xrLocateSpace = pfnLocateSpace;
+			m_xrStringToPath = pfnStringToPath;
+			m_xrSuggestInteractionProfileBindings = pfnSuggestInteractionProfileBindings;
+			m_xrAttachSessionActionSets = pfnAttachSessionActionSets;
+			m_xrSyncActions = pfnSyncActions;
+			m_xrPollEvent = pfnPollEvent;
+		}
+
+		void setDispatchTableForTestingSwapchain(
+			PFN_xrAcquireSwapchainImage pfnAcquireSwapchainImage,
+			PFN_xrWaitSwapchainImage pfnWaitSwapchainImage,
+			PFN_xrEnumerateSwapchainImages pfnEnumerateSwapchainImages)
+		{
+			m_xrAcquireSwapchainImage = pfnAcquireSwapchainImage;
+			m_xrWaitSwapchainImage = pfnWaitSwapchainImage;
+			m_xrEnumerateSwapchainImages = pfnEnumerateSwapchainImages;
 		}
 
 		// Specially-handled by the auto-generated code.

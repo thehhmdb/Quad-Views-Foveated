@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <set>
+#include <memory>
 
 namespace openxr_api_layer {
 
@@ -50,20 +51,22 @@ namespace openxr_api_layer {
         void trackSwapchain(XrSwapchain handle, const XrSwapchainCreateInfo& createInfo);
         void untrackSwapchain(XrSwapchain handle, OpenXrApi* openXrApi);
 
-        Swapchain* getSwapchain(XrSwapchain handle);
+        // Explicitly destroys all layer-created full-FOV swapchains.
+        // Must be called before xrDestroySession.
+        void destroyAllFullFovSwapchains(OpenXrApi* openXrApi);
+
+        // FIX (Item 8): Return shared_ptr to guarantee lifetime during frame composition
+        std::shared_ptr<Swapchain> getSwapchain(XrSwapchain handle);
 
         void handleAcquire(XrSwapchain handle, OpenXrApi* openXrApi);
         bool handleRelease(XrSwapchain handle);
 
         std::set<XrSwapchain> checkAndResetDeferredReleases();
 
-        // Explicitly destroys all layer-created full-FOV swapchains.
-        // Must be called before xrDestroySession.
-        void destroyAllFullFovSwapchains(OpenXrApi* openXrApi);
-
       private:
         std::mutex m_mutex;
-        std::unordered_map<XrSwapchain, Swapchain> m_swapchains;
+        // FIX (Item 8): Store shared_ptr
+        std::unordered_map<XrSwapchain, std::shared_ptr<Swapchain>> m_swapchains;
         bool m_needDeferredSwapchainReleaseQuirk{false};
     };
 

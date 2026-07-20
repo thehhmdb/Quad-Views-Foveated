@@ -42,11 +42,10 @@ namespace openxr_api_layer {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
-        TraceLoggingWrite(g_traceProvider,
-                          "xrCreateReferenceSpace",
-                          TLXArg(session, "Session"),
-                          TLArg(xr::ToCString(createInfo->referenceSpaceType), "ReferenceSpaceType"),
-                          TLArg(xr::ToString(createInfo->poseInReferenceSpace).c_str(), "PoseInReferenceSpace"));
+        QVF_TRACE("xrCreateReferenceSpace",
+                  TLXArg(session, "Session"),
+                  TLArg(xr::ToCString(createInfo->referenceSpaceType), "ReferenceSpaceType"),
+                  TLArg(xr::ToString(createInfo->poseInReferenceSpace).c_str(), "PoseInReferenceSpace"));
 
         XrReferenceSpaceCreateInfo chainCreateInfo = *createInfo;
 
@@ -59,7 +58,7 @@ namespace openxr_api_layer {
         const XrResult result = openXrApi->OpenXrApi::xrCreateReferenceSpace(session, &chainCreateInfo, space);
 
         if (XR_SUCCEEDED(result)) {
-            TraceLoggingWrite(g_traceProvider, "xrCreateReferenceSpace", TLXArg(*space, "Space"));
+            QVF_TRACE("xrCreateReferenceSpace", TLXArg(*space, "Space"));
 
             if (isVarjoCombinedEyeSpace) {
                 std::unique_lock lock(m_mutex);
@@ -71,7 +70,7 @@ namespace openxr_api_layer {
     }
 
     XrResult GazeSpaceManager::destroySpace(XrSpace space, OpenXrApi* openXrApi) {
-        TraceLoggingWrite(g_traceProvider, "xrDestroySpace", TLXArg(space, "Space"));
+        QVF_TRACE("xrDestroySpace", TLXArg(space, "Space"));
 
         const XrResult result = openXrApi->OpenXrApi::xrDestroySpace(space);
 
@@ -84,11 +83,10 @@ namespace openxr_api_layer {
     }
 
     XrResult GazeSpaceManager::locateSpace(XrSpace space, XrSpace baseSpace, XrTime time, XrSpaceLocation* location, EyeTracker& eyeTracker, XrSession session) {
-        TraceLoggingWrite(g_traceProvider,
-                          "xrLocateSpace",
-                          TLXArg(space, "Space"),
-                          TLXArg(baseSpace, "BaseSpace"),
-                          TLArg(time, "Time"));
+        QVF_TRACE("xrLocateSpace",
+                  TLXArg(space, "Space"),
+                  TLXArg(baseSpace, "BaseSpace"),
+                  TLArg(time, "Time"));
 
         std::unique_lock lock(m_mutex);
 
@@ -116,10 +114,9 @@ namespace openxr_api_layer {
         }
 
         if (XR_SUCCEEDED(result)) {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrLocateSpace",
-                              TLArg(location->locationFlags, "LocationFlags"),
-                              TLArg(xr::ToString(location->pose).c_str(), "Pose"));
+            QVF_TRACE("xrLocateSpace",
+                      TLArg(location->locationFlags, "LocationFlags"),
+                      TLArg(xr::ToString(location->pose).c_str(), "Pose"));
         }
 
         return result;

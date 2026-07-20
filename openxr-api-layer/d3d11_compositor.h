@@ -22,20 +22,21 @@
 
 #pragma once
 
-#include "compositor.h"
+#include "compositor_base.h"
+#include <memory>
 
 namespace openxr_api_layer {
 
     // Per-swapchain graphics state for D3D11.
-    struct D3D11SwapchainGraphicsState {
-        // Cached swapchain images
-        std::vector<ID3D11Texture2D*> images;
-        std::vector<ID3D11Texture2D*> fullFovSwapchainImages;
-        uint32_t acquiredFullFovImageIndex{0};
+    // Inherits full-FOV lifecycle fields from SwapchainGraphicsStateBase.
+    struct D3D11SwapchainGraphicsState : public SwapchainGraphicsStateBase {
+        // Cached swapchain images (ComPtr ensures textures stay alive while cached)
+        std::vector<ComPtr<ID3D11Texture2D>> images;
+        std::vector<ComPtr<ID3D11Texture2D>> fullFovSwapchainImages;
 
         // Flat images for quad views
         ComPtr<ID3D11Texture2D> flatImage[xr::QuadView::Count];
-        // Cached SRVs for flat images (Performance: avoid per-frame CreateShaderResourceView)
+        // Cached SRVs for flat images
         ComPtr<ID3D11ShaderResourceView> srvFlatImage[xr::QuadView::Count];
 
         // Sharpened images
@@ -44,17 +45,12 @@ namespace openxr_api_layer {
         ComPtr<ID3D11ShaderResourceView> srvSharpenedImage[xr::StereoView::Count];
         ComPtr<ID3D11UnorderedAccessView> uavSharpenedImage[xr::StereoView::Count];
 
-        // History textures for temporal stability (TAA-lite)
-        ComPtr<ID3D11Texture2D> historyImage[xr::StereoView::Count];
-        ComPtr<ID3D11ShaderResourceView> srvHistoryImage[xr::StereoView::Count];
-        ComPtr<ID3D11RenderTargetView> rtvHistoryImage[xr::StereoView::Count];
-
-        // Cached RTVs for full FOV destination images (one per array slice)
-        ComPtr<ID3D11RenderTargetView> rtvDestination[xr::StereoView::Count];
+        // Cached RTV for destination images (vector indexed by acquiredFullFovImageIndex to avoid dangling thread_local)
+        std::vector<ComPtr<ID3D11RenderTargetView>> rtvDestination[xr::StereoView::Count];
     };
 
     // D3D11 implementation of the compositor interface.
-    class D3D11Compositor : public ICompositor {
+    class D3D11Compositor : public BaseCompositor<D3D11Compositor, D3D11SwapchainGraphicsState> {
     public:
         D3D11Compositor(ID3D11Device* device, OpenXrApi* openXrApi);
         // Call destroy() in the destructor so resources are released even if destroy() was not
@@ -64,29 +60,76 @@ namespace openxr_api_layer {
         }
 
         bool initialize(int32_t swapchainFormat) override;
-        void* compositeView(const CompositorParams& params,
-                            const SwapchainInfo& stereoSwapchain,
-                            const XrCompositionLayerProjectionView& stereoView,
-                            const SwapchainInfo& focusSwapchain,
-                            const XrCompositionLayerProjectionView& focusView) override;
         void destroy() override;
         bool isInitialized() const override;
-
-        // Evict the cached graphics state for a swapchain. Must be called by the layer when a
-        // swapchain is destroyed, to avoid holding dangling raw texture pointers.
-        void evictSwapchainState(XrSwapchain handle) {
-            m_swapchainStates.erase(handle);
-        }
-
-        // FIX: Wait for GPU to finish all composition work.
         void waitForGpuIdle() override;
 
+        // compositeView is inherited from BaseCompositor — it calls CRTP hooks below.
+
+        // Called by BaseCompositor::NeedsReallocate via CRTP
+        static void GetTextureDesc(const void* texture,
+                                    uint32_t& outWidth,
+                                    uint32_t& outHeight,
+                                    uint32_t& outFormat) {
+            auto* d3d11Tex = static_cast<ID3D11Texture2D*>(const_cast<void*>(texture));
+            D3D11_TEXTURE2D_DESC desc{};
+            d3d11Tex->GetDesc(&desc);
+            outWidth = desc.Width;
+            outHeight = desc.Height;
+            outFormat = static_cast<uint32_t>(desc.Format);
+        }
+
     private:
+        // Allow the CRTP base class to access private hooks
+        friend BaseCompositor<D3D11Compositor, D3D11SwapchainGraphicsState>;
+
+        // --- CRTP hooks called by BaseCompositor::compositeView ---
+
         void populateSwapchainImagesCache(D3D11SwapchainGraphicsState& state, XrSwapchain swapchain, bool isFullFov);
+
+        bool acquireAndResolveImages(
+            const CompositorParams& params,
+            const SwapchainInfo& stereoSwapchain,
+            const SwapchainInfo& focusSwapchain,
+            D3D11SwapchainGraphicsState& stereoState,
+            D3D11SwapchainGraphicsState& focusState,
+            void*& outSourceStereo,
+            void*& outSourceFocus,
+            void*& outDestination);
+
+        void BindDirectSource(D3D11SwapchainGraphicsState& state, uint32_t targetSlot, void* sourceImage, uint32_t format);
+        bool NeedsFlatReallocate(D3D11SwapchainGraphicsState& state, uint32_t targetSlot, uint32_t width, uint32_t height, uint32_t format);
+        void CreateFlatImage(D3D11SwapchainGraphicsState& state, uint32_t targetSlot, uint32_t width, uint32_t height, uint32_t format);
+        void CopySubImage(D3D11SwapchainGraphicsState& state, uint32_t targetSlot, void* sourceImage, const XrCompositionLayerProjectionView& view);
+
+        void sharpenFocusView(
+            const CompositorParams& params,
+            const XrCompositionLayerProjectionView& focusView,
+            const SwapchainInfo& focusSwapchain,
+            D3D11SwapchainGraphicsState& focusState);
+
+        void renderProjection(
+            const CompositorParams& params,
+            const XrCompositionLayerProjectionView& focusView,
+            const SwapchainInfo& stereoSwapchain,
+            const SwapchainInfo& focusSwapchain,
+            D3D11SwapchainGraphicsState& stereoState,
+            D3D11SwapchainGraphicsState& focusState,
+            void* destination);
+
+        void cleanupAndRelease(
+            const CompositorParams& params,
+            D3D11SwapchainGraphicsState& stereoState);
+
+        // --- View caching helpers ---
+
+        ID3D11ShaderResourceView* getOrCreateFlatSRV(D3D11SwapchainGraphicsState& state, uint32_t slot, DXGI_FORMAT format);
+        ID3D11ShaderResourceView* getOrCreateSharpenedSRV(D3D11SwapchainGraphicsState& state, uint32_t viewIndex);
+        ID3D11UnorderedAccessView* getOrCreateSharpenedUAV(D3D11SwapchainGraphicsState& state, uint32_t viewIndex);
+        ID3D11RenderTargetView* getOrCreateRTV(D3D11SwapchainGraphicsState& state, uint32_t viewIndex, uint32_t acquiredIndex, ID3D11Texture2D* destination, DXGI_FORMAT format);
 
         ComPtr<ID3D11Device> m_device;
         ComPtr<ID3D11DeviceContext> m_context;
-        OpenXrApi* m_openXrApi{nullptr};
 
         // Composition resources
         ComPtr<ID3D11SamplerState> m_linearClampSampler;
@@ -100,8 +143,11 @@ namespace openxr_api_layer {
         ComPtr<ID3D11Texture2D> m_blankTexture;
         ComPtr<ID3D11ShaderResourceView> m_srvBlankTexture;
 
-        // Per-swapchain graphics state
-        std::unordered_map<XrSwapchain, D3D11SwapchainGraphicsState> m_swapchainStates;
+        // FIX (Item 2): Query object to track GPU execution completion
+        ComPtr<ID3D11Query> m_frameEndQuery;
+
+        // NOTE: m_swapchainStates and m_swapchainStatesMutex are now inherited
+        //       from BaseCompositor.
     };
 
 } // namespace openxr_api_layer

@@ -33,36 +33,37 @@ namespace openxr_api_layer {
     using log::LogDebug;
 
     FramePipeline::FramePipeline() {
-        // Performance: Start a persistent worker thread for turbo-mode async waits.
-        // Avoids the overhead of creating a new thread per frame via std::async.
-        m_asyncWorkerRunning.store(true);
-        m_asyncWorkerThread = std::thread([this]() {
-            while (m_asyncWorkerRunning.load()) {
-                std::unique_lock lock(m_asyncWorkMutex);
-                m_asyncWorkCv.wait(lock, [this]() {
-                    return !m_pendingWork.openXrApi || !m_asyncWorkerRunning.load();
-                });
-                if (!m_asyncWorkerRunning.load()) break;
+        // Start persistent turbo-mode worker thread
+        m_waitThread = std::thread([this]() {
+            while (!m_shutdown) {
+                std::unique_lock lock(m_waitMutex);
+                m_waitCv.wait(lock, [this]() { return m_waitRequested || m_shutdown; });
+                if (m_shutdown) break;
 
-                // Swap pending work into current
-                AsyncWork work = std::move(m_pendingWork);
-                m_pendingWork = {};
+                m_threadFrameState = {XR_TYPE_FRAME_STATE};
 
-                lock.unlock();
-
-                if (work.openXrApi && work.session != XR_NULL_HANDLE) {
-                    XrFrameState frameState{XR_TYPE_FRAME_STATE};
-                    // Explicitly call the base class to avoid infinite recursion
-                    auto result = work.openXrApi->OpenXrApi::xrWaitFrame(work.session, nullptr, &frameState);
-                    if (XR_SUCCEEDED(result)) {
-                        std::unique_lock asyncLock(m_asyncWaitMutex);
-                        m_lastPredictedDisplayTime = frameState.predictedDisplayTime;
-                        m_lastPredictedDisplayPeriod = frameState.predictedDisplayPeriod;
-                        m_lastShouldRender = !!frameState.shouldRender;
-                        m_asyncWaitCompleted = true;
-                    }
+                // FIX (Item 7): Check for session loss to prevent infinite hangs during shutdown.
+                XrResult waitResult = m_threadOpenXrApi->OpenXrApi::xrWaitFrame(
+                    m_threadSession, nullptr, &m_threadFrameState);
+                if (waitResult == XR_ERROR_SESSION_LOST || waitResult == XR_ERROR_HANDLE_INVALID) {
+                    break;
                 }
-                work.promise.set_value();
+                if (XR_FAILED(waitResult)) {
+                    LogDebug("Turbo mode worker: xrWaitFrame failed with {}\n",
+                             xr::ToCString(waitResult));
+                    break;
+                }
+
+                {
+                    std::unique_lock alock(m_asyncWaitMutex);
+                    m_lastPredictedDisplayTime = m_threadFrameState.predictedDisplayTime;
+                    m_lastPredictedDisplayPeriod = m_threadFrameState.predictedDisplayPeriod;
+                    m_lastShouldRender = m_threadFrameState.shouldRender;
+                    m_asyncWaitCompleted = true;
+                }
+
+                m_asyncWaitPromise.set_value(m_threadFrameState);
+                m_waitRequested = false;
             }
         });
     }
@@ -74,9 +75,7 @@ namespace openxr_api_layer {
                                       bool useTurboMode,
                                       bool* outIsAsyncMode) {
         LogDebug(">> xrWaitFrame entry\n");
-        if (IsTraceEnabled()) {
-            TraceLoggingWrite(g_traceProvider, "xrWaitFrame", TLXArg(session, "Session"));
-        }
+        QVF_TRACE("xrWaitFrame", TLXArg(session, "Session"));
 
         const auto lastFrameWaitTimestamp = m_lastFrameWaitTimestamp;
         m_lastFrameWaitTimestamp = std::chrono::steady_clock::now();
@@ -85,19 +84,18 @@ namespace openxr_api_layer {
             std::unique_lock lock(m_frameMutex);
 
             // Roundup frame statistics.
-            if (IsTraceEnabled() && m_appFrameCpuTimer) {
+            if (log::IsTraceEnabled() && m_appFrameCpuTimer) {
                 m_appFrameCpuTimer->stop();
 
-                TraceLoggingWrite(g_traceProvider,
-                                  "AppStatistics",
-                                  TLArg(m_frameTimes.size(), "Fps"),
-                                  TLArg(m_appFrameCpuTimer->query(), "AppCpuTime"),
-                                  TLArg(m_appRenderCpuTimer ? m_appRenderCpuTimer->query() : 0, "RenderCpuTime"),
-                                  TLArg(0, "AppGpuTime"));
+                QVF_TRACE("AppStatistics",
+                          TLArg(m_frameTimes.size(), "Fps"),
+                          TLArg(m_appFrameCpuTimer->query(), "AppCpuTime"),
+                          TLArg(m_appRenderCpuTimer ? m_appRenderCpuTimer->query() : 0, "RenderCpuTime"),
+                          TLArg(0, "AppGpuTime"));
             }
 
-            if (m_asyncWaitPromise.valid()) {
-                TraceLoggingWrite(g_traceProvider, "xrWaitFrame_AsyncWaitMode");
+            if (m_asyncWaitFuture.valid()) {
+                QVF_TRACE("xrWaitFrame_AsyncWaitMode");
                 *outIsAsyncMode = true;
 
                 // In Turbo mode, we accept pipelining of exactly one frame.
@@ -105,9 +103,13 @@ namespace openxr_api_layer {
                     TraceLocalActivity(local);
 
                     // On second frame poll, we must wait.
-                    TraceLoggingWriteStart(local, "xrWaitFrame_AsyncWaitNow");
-                    m_asyncWaitPromise.wait();
-                    TraceLoggingWriteStop(local, "xrWaitFrame_AsyncWaitNow");
+                    QVF_TRACE_START(local, "xrWaitFrame_AsyncWaitNow");
+                    if (m_asyncWaitFuture.wait_for(2s) != std::future_status::ready) {
+                        ErrorLog("Turbo mode async wait timed out! Runtime may be hung.\n");
+                        QVF_TRACE_STOP(local, "xrWaitFrame_AsyncWaitNow", TLArg("Timeout", "Result"));
+                        return XR_ERROR_RUNTIME_FAILURE;
+                    }
+                    QVF_TRACE_STOP(local, "xrWaitFrame_AsyncWaitNow");
                 }
                 m_asyncWaitPolled = true;
 
@@ -144,13 +146,10 @@ namespace openxr_api_layer {
             // Per OpenXR spec, the predicted display must increase monotonically.
             frameState->predictedDisplayTime = std::max(frameState->predictedDisplayTime, m_waitedFrameTime + 1);
 
-            if (IsTraceEnabled()) {
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrWaitFrame",
-                                  TLArg(!!frameState->shouldRender, "ShouldRender"),
-                                  TLArg(frameState->predictedDisplayTime, "PredictedDisplayTime"),
-                                  TLArg(frameState->predictedDisplayPeriod, "PredictedDisplayPeriod"));
-            }
+            QVF_TRACE("xrWaitFrame",
+                      TLArg(!!frameState->shouldRender, "ShouldRender"),
+                      TLArg(frameState->predictedDisplayTime, "PredictedDisplayTime"),
+                      TLArg(frameState->predictedDisplayPeriod, "PredictedDisplayPeriod"));
 
             // Record the predicted display time.
             m_waitedFrameTime = frameState->predictedDisplayTime;
@@ -159,7 +158,7 @@ namespace openxr_api_layer {
             {
                 std::unique_lock lock(m_frameMutex);
 
-                if (IsTraceEnabled() && m_appFrameCpuTimer) {
+                if (log::IsTraceEnabled() && m_appFrameCpuTimer) {
                     m_appFrameCpuTimer->start();
                 }
             }
@@ -174,9 +173,7 @@ namespace openxr_api_layer {
                                        const XrFrameBeginInfo* frameBeginInfo,
                                        bool isAsyncMode) {
         LogDebug(">> xrBeginFrame entry (asyncMode={})\n", isAsyncMode);
-        if (IsTraceEnabled()) {
-            TraceLoggingWrite(g_traceProvider, "xrBeginFrame", TLXArg(session, "Session"));
-        }
+        QVF_TRACE("xrBeginFrame", TLXArg(session, "Session"));
 
         XrResult result = XR_ERROR_RUNTIME_FAILURE;
 
@@ -185,18 +182,18 @@ namespace openxr_api_layer {
 
             if (isAsyncMode) {
                 // In turbo mode, we do nothing here.
-                TraceLoggingWrite(g_traceProvider, "xrBeginFrame_AsyncWaitMode");
+                QVF_TRACE("xrBeginFrame_AsyncWaitMode");
                 result = XR_SUCCESS;
             } else {
                 TraceLocalActivity(local);
-                TraceLoggingWriteStart(local, "xrBeginFrame_BeginFrame");
+                QVF_TRACE_START(local, "xrBeginFrame_BeginFrame");
                 // Explicitly call the base class to avoid infinite recursion through the layer's virtual override
                 result = openXrApi->OpenXrApi::xrBeginFrame(session, frameBeginInfo);
-                TraceLoggingWriteStop(local, "xrBeginFrame_BeginFrame");
+                QVF_TRACE_STOP(local, "xrBeginFrame_BeginFrame");
             }
 
             // Start app timers (inside the same lock scope - no second lock needed)
-            if (IsTraceEnabled() && m_appFrameCpuTimer) {
+            if (log::IsTraceEnabled() && m_appFrameCpuTimer) {
                 m_appRenderCpuTimer->start();
                 m_appFrameGpuTimer[m_appFrameGpuTimerIndex]->start();
             }
@@ -219,7 +216,7 @@ namespace openxr_api_layer {
         // Stop render CPU timer and rotate GPU timer
         uint64_t renderTime = 0;
         uint64_t gpuTime = 0;
-        if (IsTraceEnabled() && m_appFrameCpuTimer) {
+        if (log::IsTraceEnabled() && m_appFrameCpuTimer) {
             m_appRenderCpuTimer->stop();
             renderTime = m_appRenderCpuTimer->query();
 
@@ -235,55 +232,56 @@ namespace openxr_api_layer {
         }
 
         XrResult result = XR_SUCCESS;
-        if (m_asyncWaitPromise.valid()) {
+        if (m_asyncWaitFuture.valid()) {
             {
                 TraceLocalActivity(local);
 
                 // This is the latest point we must have fully waited a frame before proceeding.
-                TraceLoggingWriteStart(local, "xrEndFrame_AsyncWaitNow");
-                const auto ready = m_asyncWaitPromise.wait_for(1s) == std::future_status::ready;
-                TraceLoggingWriteStop(local, "xrEndFrame_AsyncWaitNow", TLArg(ready, "Ready"));
+                QVF_TRACE_START(local, "xrEndFrame_AsyncWaitNow");
+                const auto ready = m_asyncWaitFuture.wait_for(1s) == std::future_status::ready;
+                QVF_TRACE_STOP(local, "xrEndFrame_AsyncWaitNow", TLArg(ready, "Ready"));
                 if (ready) {
-                    m_asyncWaitPromise = {};
+                    m_asyncWaitFuture = {};
                 }
             }
 
             {
                 TraceLocalActivity(local);
-                TraceLoggingWriteStart(local, "xrEndFrame_BeginFrame");
+                QVF_TRACE_START(local, "xrEndFrame_BeginFrame");
                 // Explicitly call the base class to avoid infinite recursion through the layer's virtual override
                 result = openXrApi->OpenXrApi::xrBeginFrame(session, nullptr);
                 if (XR_FAILED(result)) {
                     ErrorLog(fmt::format("xrEndFrame: deferred xrBeginFrame failed with {}\n",
                                              xr::ToCString(result)));
                 }
-                TraceLoggingWriteStop(
+                QVF_TRACE_STOP(
                     local, "xrEndFrame_BeginFrame", TLArg(xr::ToCString(result), "Result"));
             }
         }
 
         if (XR_SUCCEEDED(result)) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "xrEndFrame_EndFrame");
+            QVF_TRACE_START(local, "xrEndFrame_EndFrame");
             // Explicitly call the base class to avoid infinite recursion through the layer's virtual override
             result = openXrApi->OpenXrApi::xrEndFrame(session, frameEndInfo);
-            TraceLoggingWriteStop(local, "xrEndFrame_EndFrame");
+            QVF_TRACE_STOP(local, "xrEndFrame_EndFrame");
         }
 
-        if (XR_SUCCEEDED(result) && useTurboMode && !m_asyncWaitPromise.valid()) {
+        if (XR_SUCCEEDED(result) && useTurboMode && !m_asyncWaitFuture.valid()) {
             m_asyncWaitPolled = false;
             m_asyncWaitCompleted = false;
 
-            // Performance: Use persistent worker thread instead of std::async per frame.
-            // The persistent thread avoids thread creation/destruction overhead (~0.2-0.5ms/frame).
-            auto readyPromise = std::make_shared<std::promise<void>>();
-            m_asyncWaitPromise = readyPromise->get_future();
-
+            // In Turbo mode, we signal the persistent worker thread to start waiting.
+            QVF_TRACE("xrEndFrame_AsyncWaitStart");
+            m_threadOpenXrApi = openXrApi;
+            m_threadSession = session;
+            m_asyncWaitPromise = std::promise<XrFrameState>();
+            m_asyncWaitFuture = m_asyncWaitPromise.get_future();
             {
-                std::unique_lock lock(m_asyncWorkMutex);
-                m_pendingWork = {openXrApi, session, std::move(*readyPromise)};
+                std::unique_lock lock(m_waitMutex);
+                m_waitRequested = true;
             }
-            m_asyncWorkCv.notify_one();
+            m_waitCv.notify_one();
             *outIsAsyncMode = true;
         }
 
@@ -293,25 +291,26 @@ namespace openxr_api_layer {
 
     void FramePipeline::destroy() {
         // Wait for pending async frame to complete
-        if (m_asyncWaitPromise.valid()) {
-            m_asyncWaitPromise.wait_for(5s);
-            // FIX: Do NOT destroy the future here (m_asyncWaitPromise = {}).
-            // The std::async destructor blocks until the task completes.
-            // If the async thread is blocked in xrWaitFrame, this would deadlock.
-            // The future will be safely destroyed when the FramePipeline instance
-            // is destroyed (at layer unload), at which point the async thread
-            // will have exited due to the session being destroyed.
+        if (m_asyncWaitFuture.valid()) {
+            TraceLocalActivity(local);
+            QVF_TRACE_START(local, "xrDestroySession_AsyncWaitNow");
+            m_asyncWaitFuture.wait_for(5s);
+            QVF_TRACE_STOP(local, "xrDestroySession_AsyncWaitNow");
+            m_asyncWaitFuture = {};
         }
 
-        // Stop persistent worker thread
-        m_asyncWorkerRunning.store(false);
-        {
-            std::unique_lock lock(m_asyncWorkMutex);
-            m_pendingWork = {}; // Clear any pending work
-        }
-        m_asyncWorkCv.notify_one();
-        if (m_asyncWorkerThread.joinable()) {
-            m_asyncWorkerThread.join();
+        // Shut down persistent worker thread
+        m_shutdown = true;
+        m_waitCv.notify_one();
+        if (m_waitThread.joinable()) {
+            // FIX (Item 7): Use a timeout to prevent infinite hangs.
+            std::thread::native_handle_type handle = m_waitThread.native_handle();
+            if (WaitForSingleObject((HANDLE)handle, 5000) != WAIT_OBJECT_0) {
+                ErrorLog("Turbo mode worker thread did not exit gracefully! Detaching.\n");
+                m_waitThread.detach();
+            } else {
+                m_waitThread.join();
+            }
         }
     }
 
@@ -365,10 +364,10 @@ namespace openxr_api_layer {
                                              const XrFrameWaitInfo* frameWaitInfo,
                                              XrFrameState* frameState) {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrWaitFrame_WaitFrame");
+        QVF_TRACE_START(local, "xrWaitFrame_WaitFrame");
         // Explicitly call the base class to avoid infinite recursion through the layer's virtual override
         XrResult result = openXrApi->OpenXrApi::xrWaitFrame(session, frameWaitInfo, frameState);
-        TraceLoggingWriteStop(local, "xrWaitFrame_WaitFrame");
+        QVF_TRACE_STOP(local, "xrWaitFrame_WaitFrame");
         return result;
     }
 
@@ -376,10 +375,10 @@ namespace openxr_api_layer {
                                               XrSession session,
                                               const XrFrameBeginInfo* frameBeginInfo) {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrBeginFrame_BeginFrame");
+        QVF_TRACE_START(local, "xrBeginFrame_BeginFrame");
         // Explicitly call the base class to avoid infinite recursion through the layer's virtual override
         XrResult result = openXrApi->OpenXrApi::xrBeginFrame(session, frameBeginInfo);
-        TraceLoggingWriteStop(local, "xrBeginFrame_BeginFrame");
+        QVF_TRACE_STOP(local, "xrBeginFrame_BeginFrame");
         return result;
     }
 
@@ -387,10 +386,10 @@ namespace openxr_api_layer {
                                             XrSession session,
                                             const XrFrameEndInfo* frameEndInfo) {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrEndFrame_EndFrame");
+        QVF_TRACE_START(local, "xrEndFrame_EndFrame");
         // Explicitly call the base class to avoid infinite recursion through the layer's virtual override
         XrResult result = openXrApi->OpenXrApi::xrEndFrame(session, frameEndInfo);
-        TraceLoggingWriteStop(local, "xrEndFrame_EndFrame");
+        QVF_TRACE_STOP(local, "xrEndFrame_EndFrame");
         return result;
     }
 

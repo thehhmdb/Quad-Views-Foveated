@@ -116,25 +116,23 @@ namespace openxr_api_layer {
 
         // Turbo mode async state
         std::mutex m_asyncWaitMutex;
-        std::future<void> m_asyncWaitPromise;
+        std::promise<XrFrameState> m_asyncWaitPromise;
+        std::future<XrFrameState> m_asyncWaitFuture;
         XrTime m_lastPredictedDisplayTime{0};
         XrTime m_lastPredictedDisplayPeriod{0};
         std::atomic<bool> m_lastShouldRender{true};
         std::atomic<bool> m_asyncWaitPolled{false};
         std::atomic<bool> m_asyncWaitCompleted{false};
 
-        // Performance: Persistent worker thread for turbo mode (avoids per-frame thread creation)
-        std::thread m_asyncWorkerThread;
-        std::atomic<bool> m_asyncWorkerRunning{false};
-        std::mutex m_asyncWorkMutex;
-        std::condition_variable m_asyncWorkCv;
-        struct AsyncWork {
-            OpenXrApi* openXrApi{nullptr};
-            XrSession session{XR_NULL_HANDLE};
-            std::promise<void> promise;
-        };
-        AsyncWork m_currentWork;
-        AsyncWork m_pendingWork;
+        // Persistent turbo-mode worker thread (replaces per-frame std::async)
+        std::thread m_waitThread;
+        std::mutex m_waitMutex;
+        std::condition_variable m_waitCv;
+        std::atomic<bool> m_shutdown{false};
+        std::atomic<bool> m_waitRequested{false};
+        XrFrameState m_threadFrameState{XR_TYPE_FRAME_STATE};
+        OpenXrApi* m_threadOpenXrApi{nullptr};
+        XrSession m_threadSession{XR_NULL_HANDLE};
 
         // Timers
         std::shared_ptr<utils::general::ITimer> m_appFrameCpuTimer;

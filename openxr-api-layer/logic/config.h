@@ -44,8 +44,7 @@ namespace openxr_api_layer {
         bool m_preferFoveatedRendering{true};
         bool m_forceNoEyeTracking{false};
         float m_smoothenFocusViewEdges{0.2f};
-        float m_sharpenFocusView{0.7f};
-        float m_chromaticAberrationCorrection{0.001f};
+        float m_sharpenFocusView{0.0f};
         float m_fovTangentX{1.f};
         float m_fovTangentY{1.f};
         bool m_useTurboMode{true};
@@ -59,9 +58,9 @@ namespace openxr_api_layer {
         float m_eyeTrackingConfidenceThreshold{0.5f};
         uint32_t m_eyeGazeCacheTimeoutMs{600};
 
-        // 1-Euro Filter parameters for eye tracking smoothing
-        float m_eyeTrackingMinCutoff{1.0f};    // Lower = more smoothing when still
-        float m_eyeTrackingBeta{0.007f};       // Higher = less smoothing when moving fast
+        // 1-Euro Filter parameters
+        float m_eyeTrackingMinCutoff{1.0f}; // Minimum cutoff frequency
+        float m_eyeTrackingBeta{0.1f};      // Speed coefficient (cutoff slope)
 
         // Context needed for parsing sections
         std::string m_runtimeName;
@@ -71,6 +70,9 @@ namespace openxr_api_layer {
 
         // Quirk flags parsed from config
         bool m_needFocusFovCorrectionQuirk{false};
+
+        // Dithering amount for blend alpha in transition zone
+        float m_ditheringAmount{0.04f};
 
         void LoadConfiguration(const std::filesystem::path& configPath);
         bool ParseConfigurationStatement(const std::string& line, unsigned int lineNumber, bool active,

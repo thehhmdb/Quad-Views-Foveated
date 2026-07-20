@@ -39,18 +39,18 @@ namespace openxr_api_layer {
 
     void FocusFovQuirk::storeFov(XrTime displayTime, const XrFovf& leftFov, const XrFovf& rightFov) {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrLocateViews_StoreFovForQuirk");
+        QVF_TRACE_START(local, "xrLocateViews_StoreFovForQuirk");
         std::unique_lock lock(m_mutex);
 
         m_fovForDisplayTime.insert_or_assign(
             displayTime,
             std::make_pair(leftFov, rightFov));
-        TraceLoggingWriteStop(local, "xrLocateViews_StoreFovForQuirk");
+        QVF_TRACE_STOP(local, "xrLocateViews_StoreFovForQuirk");
     }
 
     bool FocusFovQuirk::lookupFov(XrTime displayTime, uint32_t focusViewIndex, XrFovf& outFov) const {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrEndFrame_LookupFovForQuirk");
+        QVF_TRACE_START(local, "xrEndFrame_LookupFovForQuirk");
         std::unique_lock lock(m_mutex);
 
         bool found = false;
@@ -59,23 +59,26 @@ namespace openxr_api_layer {
             outFov = focusViewIndex == xr::QuadView::FocusLeft ? cit->second.first : cit->second.second;
             found = true;
         }
-        TraceLoggingWriteStop(local, "xrEndFrame_LookupFovForQuirk", TLArg(found, "Found"));
+        QVF_TRACE_STOP(local, "xrEndFrame_LookupFovForQuirk", TLArg(found, "Found"));
         return found;
     }
 
     void FocusFovQuirk::ageOldEntries(XrTime currentDisplayTime) {
         TraceLocalActivity(local);
-        TraceLoggingWriteStart(local, "xrEndFrame_AgeFovForQuirk");
+        QVF_TRACE_START(local, "xrEndFrame_AgeFovForQuirk");
         std::unique_lock lock(m_mutex);
 
-        // Delete all entries older than 1s.
-        while (!m_fovForDisplayTime.empty() &&
-               m_fovForDisplayTime.cbegin()->first < currentDisplayTime - 1'000'000'000) {
-            m_fovForDisplayTime.erase(m_fovForDisplayTime.begin());
+        // Delete all entries older than 1s (unordered_map iteration).
+        for (auto it = m_fovForDisplayTime.begin(); it != m_fovForDisplayTime.end(); ) {
+            if (it->first < currentDisplayTime - 1'000'000'000) {
+                it = m_fovForDisplayTime.erase(it);
+            } else {
+                ++it;
+            }
         }
-        TraceLoggingWriteStop(local,
-                              "xrEndFrame_AgeFovForQuirk",
-                              TLArg(m_fovForDisplayTime.size(), "DictionarySize"));
+        QVF_TRACE_STOP(local,
+                       "xrEndFrame_AgeFovForQuirk",
+                       TLArg(m_fovForDisplayTime.size(), "DictionarySize"));
     }
 
 } // namespace openxr_api_layer

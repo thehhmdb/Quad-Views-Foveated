@@ -49,6 +49,11 @@ namespace openxr_api_layer {
         // Called from xrPollEvent to clear the needPollEvent flag.
         void setPollEventDone();
 
+        // Accessors for unit tests
+        bool needPollEvent() const { return m_needPollEvent; }
+        bool needAttachActionSets() const { return m_needAttachActionSets; }
+        bool needSyncActions() const { return m_needSyncActions; }
+
       private:
         OpenXrApi* m_openXrApi;
         EyeTracker& m_eyeTracker;

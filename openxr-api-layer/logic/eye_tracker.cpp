@@ -24,7 +24,6 @@
 #include "eye_tracker.h"
 #include "framework/log.h"
 #include "framework/util.h"
-#include <DirectXMath.h>
 
 namespace openxr_api_layer {
 
@@ -32,86 +31,37 @@ namespace openxr_api_layer {
     using namespace xr;
     using namespace xr::math;
 
+    // Anonymous namespace to avoid ODR violations
+    namespace {
+        constexpr float kPi = 3.14159265358979323846f;
+
+        float LowPassAlpha(float dt, float cutoff) {
+            float tau = 1.0f / (2.0f * kPi * cutoff);
+            return 1.0f / (1.0f + tau / dt);
+        }
+
+        XrVector3f LowPassFilter(const XrVector3f& current, const XrVector3f& previous, float alpha) {
+            return {
+                current.x + alpha * (previous.x - current.x),
+                current.y + alpha * (previous.y - current.y),
+                current.z + alpha * (previous.z - current.z)
+            };
+        }
+
+        float VectorLength(const XrVector3f& v) {
+            return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        }
+    } // namespace
+
     EyeTracker::EyeTracker(OpenXrApi* openXrApi, FoveationConfig& config)
         : m_openXrApi(openXrApi), m_config(config) {}
 
-    // --- Vec3 Math Helpers ---
-    XrVector3f EyeTracker::addVec3(const XrVector3f& a, const XrVector3f& b) {
-        return {a.x + b.x, a.y + b.y, a.z + b.z};
-    }
-    XrVector3f EyeTracker::subVec3(const XrVector3f& a, const XrVector3f& b) {
-        return {a.x - b.x, a.y - b.y, a.z - b.z};
-    }
-    XrVector3f EyeTracker::scaleVec3(const XrVector3f& a, float s) {
-        return {a.x * s, a.y * s, a.z * s};
-    }
-    float EyeTracker::lengthVec3(const XrVector3f& a) {
-        return sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
-    }
-    XrVector3f EyeTracker::normalizeVec3(const XrVector3f& a) {
-        float len = lengthVec3(a);
-        if (len < 1e-8f) return {0, 0, -1};
-        float invLen = 1.0f / len;
-        return {a.x * invLen, a.y * invLen, a.z * invLen};
-    }
-
-    // --- 1-Euro Filter Helpers ---
-    float EyeTracker::calcAlpha(float cutoff, float dt) {
-        float tau = 1.0f / (2.0f * 3.14159265f * cutoff);
-        return 1.0f / (1.0f + tau / dt);
-    }
-
-    float EyeTracker::lowPassFilter(float alpha, float prev, float current) {
-        return alpha * current + (1.0f - alpha) * prev;
-    }
-
-    XrVector3f EyeTracker::lowPassFilterVec3(float alpha, const XrVector3f& prev, const XrVector3f& current) {
-        return {
-            lowPassFilter(alpha, prev.x, current.x),
-            lowPassFilter(alpha, prev.y, current.y),
-            lowPassFilter(alpha, prev.z, current.z)
-        };
-    }
-
-    XrVector3f EyeTracker::filterGaze(const XrVector3f& rawGaze, XrTime time) {
-        if (!m_filterInitialized || time <= m_prevGazeTime) {
-            m_prevRawGaze = rawGaze;
-            m_prevFilteredGaze = rawGaze;
-            m_prevFilteredGazeDeriv = {0.0f, 0.0f, 0.0f};
-            m_prevGazeTime = time;
-            m_filterInitialized = true;
-            return rawGaze;
+    EyeTracker::~EyeTracker() {
+        // If simulated tracking is active, release the mouse cursor clip
+        // that was applied in getSimulatedTracking().
+        if (m_trackerType == Tracker::SimulatedTracking) {
+            ClipCursor(nullptr);
         }
-
-        // dt in seconds
-        float dt = static_cast<float>(time - m_prevGazeTime) / 1'000'000'000.0f;
-        dt = std::max(dt, 0.0001f); // Prevent division by zero
-
-        // 1. Filter the derivative (speed) to estimate smooth speed
-        XrVector3f rawDeriv = scaleVec3(subVec3(rawGaze, m_prevRawGaze), 1.0f / dt);
-        float alphaDeriv = calcAlpha(m_config.m_eyeTrackingMinCutoff + 5.0f, dt); // High cutoff for speed
-        XrVector3f filteredDeriv = lowPassFilterVec3(alphaDeriv, m_prevFilteredGazeDeriv, rawDeriv);
-
-        float speed = lengthVec3(filteredDeriv);
-
-        // 2. Determine cutoff frequency based on speed
-        // When speed is high, cutoff is high (less smoothing). When low, cutoff is low (more smoothing).
-        float cutoff = m_config.m_eyeTrackingMinCutoff + (m_config.m_eyeTrackingBeta * speed);
-
-        // 3. Filter the position
-        float alphaPos = calcAlpha(cutoff, dt);
-        XrVector3f filteredGaze = lowPassFilterVec3(alphaPos, m_prevFilteredGaze, rawGaze);
-
-        // Ensure the result stays on the unit sphere
-        filteredGaze = normalizeVec3(filteredGaze);
-
-        // Update state
-        m_prevRawGaze = rawGaze;
-        m_prevFilteredGaze = filteredGaze;
-        m_prevFilteredGazeDeriv = filteredDeriv;
-        m_prevGazeTime = time;
-
-        return filteredGaze;
     }
 
     void EyeTracker::initialize(XrSession session) {
@@ -135,7 +85,7 @@ namespace openxr_api_layer {
     void EyeTracker::initializeEyeTrackingFB(XrSession session) {
         XrEyeTrackerCreateInfoFB createInfo{XR_TYPE_EYE_TRACKER_CREATE_INFO_FB};
         CHECK_XRCMD(m_openXrApi->xrCreateEyeTrackerFB(session, &createInfo, &m_eyeTrackerFB));
-        TraceLoggingWrite(g_traceProvider, "EyeTrackerFB", TLXArg(m_eyeTrackerFB, "Handle"));
+        QVF_TRACE("EyeTrackerFB", TLXArg(m_eyeTrackerFB, "Handle"));
     }
 
     void EyeTracker::initializeEyeGazeInteraction(XrSession session) {
@@ -161,11 +111,10 @@ namespace openxr_api_layer {
         actionSpaceCreateInfo.poseInActionSpace = Pose::Identity();
         CHECK_XRCMD(m_openXrApi->xrCreateActionSpace(session, &actionSpaceCreateInfo, &m_eyeSpace));
 
-        TraceLoggingWrite(g_traceProvider,
-                          "EyeGazeInteraction",
-                          TLXArg(m_eyeTrackerActionSet, "ActionSet"),
-                          TLXArg(m_eyeGazeAction, "Action"),
-                          TLXArg(m_eyeSpace, "ActionSpace"));
+        QVF_TRACE("EyeGazeInteraction",
+                  TLXArg(m_eyeTrackerActionSet, "ActionSet"),
+                  TLXArg(m_eyeGazeAction, "Action"),
+                  TLXArg(m_eyeSpace, "ActionSpace"));
     }
 
     bool EyeTracker::getSimulatedTracking(XrTime time, bool getStateOnly, XrVector3f& unitVector) {
@@ -201,12 +150,11 @@ namespace openxr_api_layer {
             LogWarning("xrGetEyeGazesFB failed: {}\n", xr::ToCString(gazeResult));
             return false;
         }
-        TraceLoggingWrite(g_traceProvider,
-                          "EyeTrackerFB",
-                          TLArg(!!eyeGaze.gaze[xr::StereoView::Left].isValid, "LeftValid"),
-                          TLArg(eyeGaze.gaze[xr::StereoView::Left].gazeConfidence, "LeftConfidence"),
-                          TLArg(!!eyeGaze.gaze[xr::StereoView::Right].isValid, "RightValid"),
-                          TLArg(eyeGaze.gaze[xr::StereoView::Right].gazeConfidence, "RightConfidence"));
+        QVF_TRACE("EyeTrackerFB",
+                  TLArg(!!eyeGaze.gaze[xr::StereoView::Left].isValid, "LeftValid"),
+                  TLArg(eyeGaze.gaze[xr::StereoView::Left].gazeConfidence, "LeftConfidence"),
+                  TLArg(!!eyeGaze.gaze[xr::StereoView::Right].isValid, "RightValid"),
+                  TLArg(eyeGaze.gaze[xr::StereoView::Right].gazeConfidence, "RightConfidence"));
 
         if (!(eyeGaze.gaze[xr::StereoView::Left].isValid && eyeGaze.gaze[xr::StereoView::Right].isValid)) {
             return false;
@@ -236,10 +184,9 @@ namespace openxr_api_layer {
         XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO, nullptr};
         getInfo.action = m_eyeGazeAction;
         const XrResult result = m_openXrApi->xrGetActionStatePose(session, &getInfo, &actionStatePose);
-        TraceLoggingWrite(g_traceProvider,
-                          "EyeGazeInteraction",
-                          TLArg(xr::ToCString(result), "Result"),
-                          TLArg(!!actionStatePose.isActive, "Active"));
+        QVF_TRACE("EyeGazeInteraction",
+                  TLArg(xr::ToCString(result), "Result"),
+                  TLArg(!!actionStatePose.isActive, "Active"));
 
         if (XR_FAILED(result) || !actionStatePose.isActive) {
             return false;
@@ -247,7 +194,7 @@ namespace openxr_api_layer {
 
         XrSpaceLocation location{XR_TYPE_SPACE_LOCATION, nullptr};
         CHECK_XRCMD(m_openXrApi->xrLocateSpace(m_eyeSpace, m_viewSpace, time, &location));
-        TraceLoggingWrite(g_traceProvider, "EyeGazeInteraction", TLArg(location.locationFlags, "LocationFlags"));
+        QVF_TRACE("EyeGazeInteraction", TLArg(location.locationFlags, "LocationFlags"));
 
         if (!Pose::IsPoseValid(location.locationFlags)) {
             return false;
@@ -271,8 +218,7 @@ namespace openxr_api_layer {
         if ((now - m_lastGoodEyeTrackingData).count() >=
             static_cast<int64_t>(m_config.m_eyeGazeCacheTimeoutMs) * 1'000'000) {
             m_lastGoodEyeGaze.reset();
-            m_predictedGaze.reset();
-            m_filterInitialized = false;
+            m_filterState.initialized = false;
         }
 
         bool result = false;
@@ -293,27 +239,71 @@ namespace openxr_api_layer {
         if (result) {
             m_lastGoodEyeTrackingData = now;
             if (!getStateOnly) {
-                // 1. Apply 1-Euro Adaptive Smoothing to the raw gaze
-                XrVector3f smoothedGaze = filterGaze(unitVector, time);
+                // Apply 1-Euro Filter and Prediction
+                if (!m_filterState.initialized) {
+                    // First good sample: initialize filter state to raw values
+                    m_filterState.prevRawGaze = unitVector;
+                    m_filterState.prevFilteredGaze = unitVector;
+                    m_filterState.prevFilteredGazeDeriv = {0, 0, 0};
+                    m_filterState.prevGazeTime = time;
+                    m_filterState.initialized = true;
+                } else {
+                    // Save the raw input before it gets overwritten by prediction
+                    XrVector3f rawGaze = unitVector;
 
-                m_lastGoodEyeGaze = smoothedGaze;
+                    float dt = static_cast<float>(time - m_filterState.prevGazeTime) / 1e9f;
+                    if (dt <= 0.0f) dt = 0.011f; // Assume 90fps if times are identical or out of order
 
-                // 2. Forward prediction to counteract end-to-end system latency
-                // Using smoothed derivative from the filter is much more stable than raw velocity!
-                if (m_filterInitialized) {
-                    float predictionTimeSec = 0.011f; // ~11ms at 90Hz
-
-                    // Extrapolate using the smoothed derivative (velocity)
-                    XrVector3f predictedVec = {
-                        m_prevFilteredGaze.x + m_prevFilteredGazeDeriv.x * predictionTimeSec,
-                        m_prevFilteredGaze.y + m_prevFilteredGazeDeriv.y * predictionTimeSec,
-                        m_prevFilteredGaze.z + m_prevFilteredGazeDeriv.z * predictionTimeSec
+                    // 1. Compute raw derivative (velocity)
+                    XrVector3f dx = {
+                        (rawGaze.x - m_filterState.prevRawGaze.x) / dt,
+                        (rawGaze.y - m_filterState.prevRawGaze.y) / dt,
+                        (rawGaze.z - m_filterState.prevRawGaze.z) / dt
                     };
 
-                    m_predictedGaze = normalizeVec3(predictedVec);
-                } else {
-                    m_predictedGaze = smoothedGaze;
+                    // 2. Filter derivative (fixed cutoff of 1.0 Hz as per 1-Euro paper)
+                    float alphaD = LowPassAlpha(dt, 1.0f);
+                    m_filterState.prevFilteredGazeDeriv = LowPassFilter(dx, m_filterState.prevFilteredGazeDeriv, alphaD);
+
+                    // 3. Adjust cutoff frequency based on speed
+                    float speed = VectorLength(m_filterState.prevFilteredGazeDeriv);
+                    float cutoff = m_config.m_eyeTrackingMinCutoff + m_config.m_eyeTrackingBeta * speed;
+
+                    // 4. Filter position
+                    float alphaP = LowPassAlpha(dt, cutoff);
+                    XrVector3f filteredGaze = LowPassFilter(rawGaze, m_filterState.prevFilteredGaze, alphaP);
+
+                    // 5. Apply forward prediction using stabilized derivative, scaled to refresh rate
+                    float predictionTimeSec;
+                    if (m_predictedDisplayPeriod > 0) {
+                        predictionTimeSec = (static_cast<float>(m_predictedDisplayPeriod) / 1'000'000'000.0f) * 1.5f;
+                        predictionTimeSec = std::clamp(predictionTimeSec, 0.004f, 0.025f);
+                    } else {
+                        predictionTimeSec = 0.011f; // Fallback for 90Hz
+                    }
+                    XrVector3f predictedGaze = {
+                        filteredGaze.x + m_filterState.prevFilteredGazeDeriv.x * predictionTimeSec,
+                        filteredGaze.y + m_filterState.prevFilteredGazeDeriv.y * predictionTimeSec,
+                        filteredGaze.z + m_filterState.prevFilteredGazeDeriv.z * predictionTimeSec
+                    };
+
+                    // 6. Renormalize to unit sphere
+                    float len = VectorLength(predictedGaze);
+                    if (len > 0.0f) {
+                        unitVector.x = predictedGaze.x / len;
+                        unitVector.y = predictedGaze.y / len;
+                        unitVector.z = predictedGaze.z / len;
+                    } else {
+                        unitVector = filteredGaze; // Fallback if length is 0
+                    }
+
+                    // Update filter state for next frame
+                    m_filterState.prevFilteredGaze = filteredGaze;
+                    m_filterState.prevRawGaze = rawGaze; // Use raw input, not predicted output
+                    m_filterState.prevGazeTime = time;
                 }
+
+                m_lastGoodEyeGaze = unitVector;
             }
             m_loggedEyeTrackingWarning = false;
         }
@@ -321,39 +311,14 @@ namespace openxr_api_layer {
         // To avoid warping during blinking, we use a reasonably recent cached gaze vector.
         bool useCache = false;
         if (!result && m_lastGoodEyeGaze) {
-            // Use predicted gaze if available and within timeout, otherwise fall back to last known
-            const auto timeSinceLastGood = now - m_lastGoodEyeTrackingData;
-            const int64_t timeoutNs = static_cast<int64_t>(m_config.m_eyeGazeCacheTimeoutMs) * 1'000'000;
-            
-            if (m_predictedGaze && timeSinceLastGood.count() < timeoutNs) {
-                // Use predicted gaze with decay toward center over time
-                float decay = std::clamp(static_cast<float>(timeSinceLastGood.count() - 100'000'000) / 200'000'000.0f, 0.0f, 1.0f);
-                // Center of FOV is (0, 0, -1)
-                XrVector3f centerGaze = {0.0f, 0.0f, -1.0f};
-                unitVector = {
-                    m_predictedGaze->x * (1.0f - decay) + centerGaze.x * decay,
-                    m_predictedGaze->y * (1.0f - decay) + centerGaze.y * decay,
-                    m_predictedGaze->z * (1.0f - decay) + centerGaze.z * decay
-                };
-                // Normalize using 1/sqrtf (compiler optimizes to rsqrt instruction)
-                float lenSq = unitVector.x * unitVector.x + unitVector.y * unitVector.y + unitVector.z * unitVector.z;
-                if (lenSq > 1e-8f) {
-                    float invLen = 1.0f / sqrtf(lenSq);
-                    unitVector.x *= invLen;
-                    unitVector.y *= invLen;
-                    unitVector.z *= invLen;
-                }
-            } else {
-                unitVector = m_lastGoodEyeGaze.value();
-            }
+            unitVector = m_lastGoodEyeGaze.value();
             result = useCache = true;
         }
 
-        TraceLoggingWrite(g_traceProvider,
-                          "EyeGaze",
-                          TLArg(result, "Valid"),
-                          TLArg(useCache, "UsingCache"),
-                          TLArg(xr::ToString(unitVector).c_str(), "GazeUnitVector"));
+        QVF_TRACE("EyeGaze",
+                  TLArg(result, "Valid"),
+                  TLArg(useCache, "UsingCache"),
+                  TLArg(xr::ToString(unitVector).c_str(), "GazeUnitVector"));
 
         return result;
     }

@@ -74,11 +74,10 @@ namespace openxr_api_layer {
     }
 
     void GraphicsContext::initializeD3D12(ID3D12Device* device, ID3D12CommandQueue* queue, OpenXrApi* openXrApi) {
-        TraceLoggingWrite(g_traceProvider,
-                          "initializeDeviceContext",
-                          TLArg("D3D12", "Api"),
-                          TLPArg(device, "Device"),
-                          TLPArg(queue, "Queue"));
+        QVF_TRACE("initializeDeviceContext",
+                  TLArg("D3D12", "Api"),
+                  TLPArg(device, "Device"),
+                  TLPArg(queue, "Queue"));
 
         m_isD3D12 = true;
 

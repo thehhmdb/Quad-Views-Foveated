@@ -54,7 +54,6 @@ namespace openxr_api_layer {
                                bool useQuadViews,
                                bool useFovTangent,
                                bool requestedDepthSubmission,
-                               uint32_t frameCount,
                                std::vector<XrCompositionLayerProjection>& projectionAllocator,
                                std::vector<std::array<XrCompositionLayerProjectionView, xr::StereoView::Count>>& projectionViewAllocator,
                                std::vector<const XrCompositionLayerBaseHeader*>& outLayers,
@@ -68,8 +67,7 @@ namespace openxr_api_layer {
                                   const XrCompositionLayerProjectionView& focusView,
                                   SwapchainManager::Swapchain& swapchainForFocusView,
                                   XrCompositionLayerFlags layerFlags,
-                                  bool useQuadViews,
-                                  uint32_t frameCount);
+                                  bool useQuadViews);
 
         OpenXrApi* m_openXrApi;
         FoveationConfig& m_config;
@@ -78,6 +76,9 @@ namespace openxr_api_layer {
         GraphicsContext& m_graphicsContext;
         EyeTracker& m_eyeTracker;
         FocusFovQuirk& m_focusFovQuirk;
+
+        // FIX (Item 5): Fallback flag for compositor initialization failure
+        bool m_compositorFailed{false};
     };
 
 } // namespace openxr_api_layer

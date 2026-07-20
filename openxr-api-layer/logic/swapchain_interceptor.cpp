@@ -40,23 +40,22 @@ namespace openxr_api_layer {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
-        TraceLoggingWrite(g_traceProvider,
-                          "xrCreateSwapchain",
-                          TLXArg(session, "Session"),
-                          TLArg(createInfo->arraySize, "ArraySize"),
-                          TLArg(createInfo->width, "Width"),
-                          TLArg(createInfo->height, "Height"),
-                          TLArg(createInfo->createFlags, "CreateFlags"),
-                          TLArg(createInfo->format, "Format"),
-                          TLArg(createInfo->faceCount, "FaceCount"),
-                          TLArg(createInfo->mipCount, "MipCount"),
-                          TLArg(createInfo->sampleCount, "SampleCount"),
-                          TLArg(createInfo->usageFlags, "UsageFlags"));
+        QVF_TRACE("xrCreateSwapchain",
+                  TLXArg(session, "Session"),
+                  TLArg(createInfo->arraySize, "ArraySize"),
+                  TLArg(createInfo->width, "Width"),
+                  TLArg(createInfo->height, "Height"),
+                  TLArg(createInfo->createFlags, "CreateFlags"),
+                  TLArg(createInfo->format, "Format"),
+                  TLArg(createInfo->faceCount, "FaceCount"),
+                  TLArg(createInfo->mipCount, "MipCount"),
+                  TLArg(createInfo->sampleCount, "SampleCount"),
+                  TLArg(createInfo->usageFlags, "UsageFlags"));
 
         const XrResult result = openXrApi->OpenXrApi::xrCreateSwapchain(session, createInfo, swapchain);
 
         if (XR_SUCCEEDED(result)) {
-            TraceLoggingWrite(g_traceProvider, "xrCreateSwapchain", TLXArg(*swapchain, "Swapchain"));
+            QVF_TRACE("xrCreateSwapchain", TLXArg(*swapchain, "Swapchain"));
             LogDebug("xrCreateSwapchain: format={}, size={}x{}, arraySize={}, swapchain={:x}\n",
                             createInfo->format, createInfo->width, createInfo->height, createInfo->arraySize, (uint64_t)*swapchain);
 
@@ -69,31 +68,24 @@ namespace openxr_api_layer {
     }
 
     XrResult SwapchainInterceptor::destroySwapchain(XrSwapchain swapchain, OpenXrApi* openXrApi) {
-        TraceLoggingWrite(g_traceProvider, "xrDestroySwapchain", TLXArg(swapchain, "Swapchain"));
-
-        // FIX: Wait for GPU to finish all composition work before destroying the swapchain.
-        // This prevents the runtime from freeing images that the GPU is still using.
-        if (m_graphicsContext.getCompositor()) {
-            m_graphicsContext.getCompositor()->waitForGpuIdle();
-        }
+        QVF_TRACE("xrDestroySwapchain", TLXArg(swapchain, "Swapchain"));
 
         const XrResult result = openXrApi->OpenXrApi::xrDestroySwapchain(swapchain);
 
         if (XR_SUCCEEDED(result)) {
-            m_swapchainManager.untrackSwapchain(swapchain, openXrApi);
-
-            // Evict the compositor's cached graphics state for this swapchain so we do not
-            // hold dangling raw texture pointers after the runtime freed the swapchain images.
+            // FIX: Evict compositor state BEFORE untracking so the compositor can release
+            // any acquired full FOV swapchain images before they are destroyed.
             if (m_graphicsContext.getCompositor()) {
                 m_graphicsContext.getCompositor()->evictSwapchainState(swapchain);
             }
+            m_swapchainManager.untrackSwapchain(swapchain, openXrApi);
         }
 
         return result;
     }
 
     XrResult SwapchainInterceptor::acquireSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo* acquireInfo, uint32_t* index, OpenXrApi* openXrApi, bool useFovModes) {
-        TraceLoggingWrite(g_traceProvider, "xrAcquireSwapchainImage", TLXArg(swapchain, "Swapchain"));
+        QVF_TRACE("xrAcquireSwapchainImage", TLXArg(swapchain, "Swapchain"));
 
         // Handle deferred release before acquire
         if (useFovModes && m_swapchainManager.getDeferredReleaseQuirk()) {
@@ -103,10 +95,10 @@ namespace openxr_api_layer {
         const XrResult result = openXrApi->OpenXrApi::xrAcquireSwapchainImage(swapchain, acquireInfo, index);
 
         if (XR_SUCCEEDED(result)) {
-            TraceLoggingWrite(g_traceProvider, "xrAcquireSwapchainImage", TLArg(*index, "Index"));
+            QVF_TRACE("xrAcquireSwapchainImage", TLArg(*index, "Index"));
 
             // Update acquired index tracking
-            auto* swapchainEntry = m_swapchainManager.getSwapchain(swapchain);
+            auto swapchainEntry = m_swapchainManager.getSwapchain(swapchain);
             if (swapchainEntry) {
                 swapchainEntry->acquiredIndex.push_back(*index);
             }
@@ -116,7 +108,7 @@ namespace openxr_api_layer {
     }
 
     XrResult SwapchainInterceptor::releaseSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* releaseInfo, OpenXrApi* openXrApi, bool useFovModes) {
-        TraceLoggingWrite(g_traceProvider, "xrReleaseSwapchainImage", TLXArg(swapchain, "Swapchain"));
+        QVF_TRACE("xrReleaseSwapchainImage", TLXArg(swapchain, "Swapchain"));
 
         bool deferRelease = false;
         if (useFovModes && m_swapchainManager.getDeferredReleaseQuirk()) {
@@ -127,19 +119,17 @@ namespace openxr_api_layer {
         if (!deferRelease) {
             result = openXrApi->OpenXrApi::xrReleaseSwapchainImage(swapchain, releaseInfo);
         } else {
-            TraceLoggingWrite(g_traceProvider, "xrReleaseSwapchainImage_Defer");
+            QVF_TRACE("xrReleaseSwapchainImage_Defer");
             result = XR_SUCCESS;
         }
 
         if (XR_SUCCEEDED(result)) {
             // Update lastReleasedIndex
-            auto* swapchainEntry = m_swapchainManager.getSwapchain(swapchain);
+            auto swapchainEntry = m_swapchainManager.getSwapchain(swapchain);
             if (swapchainEntry && !swapchainEntry->acquiredIndex.empty()) {
-                swapchainEntry->lastReleasedIndex = swapchainEntry->acquiredIndex.front();
-                swapchainEntry->acquiredIndex.pop_front();
+                swapchainEntry->lastReleasedIndex = swapchainEntry->acquiredIndex.front();                swapchainEntry->acquiredIndex.pop_front();
             }
         }
-
         return result;
     }
 

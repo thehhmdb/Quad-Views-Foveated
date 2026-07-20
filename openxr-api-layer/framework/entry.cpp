@@ -54,11 +54,9 @@ XrResult __declspec(dllexport) XRAPI_CALL
     xrNegotiateLoaderApiLayerInterface(const XrNegotiateLoaderInfo* const loaderInfo,
                                        const char* const apiLayerName,
                                        XrNegotiateApiLayerRequest* const apiLayerRequest) {
-    TraceLoggingWrite(g_traceProvider, "xrNegotiateLoaderApiLayerInterface");
-
-    // Retrieve the path of the DLL.
-    if (dllHome.empty()) {
-        HMODULE module;
+    QVF_TRACE("xrNegotiateLoaderApiLayerInterface");
+    {
+        HMODULE module = nullptr;
         if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                (LPCSTR)&dllHome,
                                &module)) {
@@ -108,7 +106,7 @@ XrResult __declspec(dllexport) XRAPI_CALL
 
     Log(fmt::format("{} layer ({}) is active\n", LayerName, VersionString));
 
-    TraceLoggingWrite(g_traceProvider, "xrNegotiateLoaderApiLayerInterface_Complete");
+    QVF_TRACE("xrNegotiateLoaderApiLayerInterface_Complete");
 
     return XR_SUCCESS;
 }

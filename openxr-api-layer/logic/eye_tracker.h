@@ -38,45 +38,59 @@ namespace openxr_api_layer {
         };
 
         EyeTracker(OpenXrApi* openXrApi, FoveationConfig& config);
+        ~EyeTracker();
 
         void setType(Tracker type) { m_trackerType = type; }
         Tracker getType() const { return m_trackerType; }
+        void setPredictedDisplayPeriod(XrTime period) { m_predictedDisplayPeriod = period; }
 
         void initialize(XrSession session);
 
-        XrSpace m_viewSpace{XR_NULL_HANDLE};
-
-        // Action set and action handles (needed by layer.cpp for action injection)
-        XrActionSet m_eyeTrackerActionSet{XR_NULL_HANDLE};
-        XrAction m_eyeGazeAction{XR_NULL_HANDLE};
-
-        // Warning state tracking
-        std::chrono::time_point<std::chrono::steady_clock> m_lastGoodEyeTrackingData{};
-        std::optional<XrVector3f> m_lastGoodEyeGaze;
-        bool m_loggedEyeTrackingWarning{false};
-
-        // 1-Euro Filter state for adaptive gaze smoothing
-        XrVector3f m_prevRawGaze{0.0f, 0.0f, -1.0f};
-        XrVector3f m_prevFilteredGaze{0.0f, 0.0f, -1.0f};
-        XrVector3f m_prevFilteredGazeDeriv{0.0f, 0.0f, 0.0f};
-        XrTime m_prevGazeTime{0};
-        bool m_filterInitialized{false};
-
-        // Predicted gaze for dropout handling
-        std::optional<XrVector3f> m_predictedGaze;
-
-        // Helper math functions for XrVector3f
-        static XrVector3f addVec3(const XrVector3f& a, const XrVector3f& b);
-        static XrVector3f subVec3(const XrVector3f& a, const XrVector3f& b);
-        static XrVector3f scaleVec3(const XrVector3f& a, float s);
-        static float lengthVec3(const XrVector3f& a);
-        static XrVector3f normalizeVec3(const XrVector3f& a);
-        static float lowPassFilter(float alpha, float prev, float current);
-        static XrVector3f lowPassFilterVec3(float alpha, const XrVector3f& prev, const XrVector3f& current);
-        static float calcAlpha(float cutoff, float dt);
-        XrVector3f filterGaze(const XrVector3f& rawGaze, XrTime time);
-
         bool getEyeGaze(XrSession session, XrTime time, bool getStateOnly, XrVector3f& unitVector);
+
+        // --- Read-only action handles for ActionManager binding injection. ---
+        XrActionSet eyeTrackerActionSet() const { return m_eyeTrackerActionSet; }
+        XrAction eyeGazeAction() const { return m_eyeGazeAction; }
+
+        // --- Eye-tracking health, as one cohesive operation set. ---
+
+        /// Mark that a fresh, valid gaze sample arrived. Clears the stale warning
+        /// so it can fire again on the next outage.
+        void noteGoodEyeTrackingData(const XrVector3f& gaze) {
+            m_lastGoodEyeTrackingData = std::chrono::steady_clock::now();
+            m_lastGoodEyeGaze = gaze;
+            m_loggedEyeTrackingWarning = false;
+        }
+
+        /// Mark that tracking was reset/lost (e.g. on session state change).
+        void resetEyeTrackingHealth() {
+            m_lastGoodEyeTrackingData = std::chrono::steady_clock::now();
+            m_lastGoodEyeGaze.reset();
+            m_loggedEyeTrackingWarning = false;
+        }
+
+        /// Returns true once per outage when tracking has been stale for >threshold.
+        /// Self-latching: repeated calls return false until noteGood/reset is called.
+        /// The optional `now` parameter enables deterministic testing.
+        bool consumeStaleTrackingWarning(std::chrono::nanoseconds threshold,
+                                         std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
+            if (m_trackerType == Tracker::None || m_loggedEyeTrackingWarning) {
+                return false;
+            }
+            const auto age = now - m_lastGoodEyeTrackingData;
+            if (age > threshold) {
+                m_loggedEyeTrackingWarning = true;
+                return true;
+            }
+            return false;
+        }
+
+        /// Returns the most recent good gaze sample (if any).
+        const std::optional<XrVector3f>& lastGoodEyeGaze() const { return m_lastGoodEyeGaze; }
+
+        // --- Test-only seams (mutate action handles for mock setup). ---
+        void setEyeTrackerActionSetForTesting(XrActionSet handle) { m_eyeTrackerActionSet = handle; }
+        void setEyeGazeActionForTesting(XrAction handle) { m_eyeGazeAction = handle; }
 
       private:
         void initializeEyeTrackingFB(XrSession session);
@@ -86,12 +100,33 @@ namespace openxr_api_layer {
         bool getEyeTrackerFB(XrTime time, bool getStateOnly, XrVector3f& unitVector);
         bool getEyeGazeInteraction(XrSession session, XrTime time, bool getStateOnly, XrVector3f& unitVector);
 
+        // 1-Euro Filter State
+        struct OneEuroFilterState {
+            XrVector3f prevRawGaze{0, 0, 0};
+            XrVector3f prevFilteredGaze{0, 0, 0};
+            XrVector3f prevFilteredGazeDeriv{0, 0, 0};
+            XrTime prevGazeTime{0};
+            bool initialized{false};
+        };
+
+        OneEuroFilterState m_filterState;
+
         OpenXrApi* m_openXrApi{nullptr};
         FoveationConfig& m_config;
         Tracker m_trackerType{Tracker::None};
+        XrTime m_predictedDisplayPeriod{0};
+
+        XrSpace m_viewSpace{XR_NULL_HANDLE};
+
+        XrActionSet m_eyeTrackerActionSet{XR_NULL_HANDLE};
+        XrAction m_eyeGazeAction{XR_NULL_HANDLE};
 
         XrEyeTrackerFB m_eyeTrackerFB{XR_NULL_HANDLE};
         XrSpace m_eyeSpace{XR_NULL_HANDLE};
+
+        std::chrono::time_point<std::chrono::steady_clock> m_lastGoodEyeTrackingData{};
+        std::optional<XrVector3f> m_lastGoodEyeGaze;
+        bool m_loggedEyeTrackingWarning{false};
     };
 
 } // namespace openxr_api_layer

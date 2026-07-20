@@ -36,15 +36,15 @@ namespace openxr_api_layer {
 
     XrResult ActionManager::attachSessionActionSets(XrSession session,
                                                      const XrSessionActionSetsAttachInfo* attachInfo) {
-        TraceLoggingWrite(g_traceProvider, "xrAttachSessionActionSets", TLXArg(session, "Session"));
+        QVF_TRACE("xrAttachSessionActionSets", TLXArg(session, "Session"));
 
         XrSessionActionSetsAttachInfo chainAttachInfo = *attachInfo;
         std::vector<XrActionSet> actionSets;
-        if (m_eyeTracker.m_eyeTrackerActionSet != XR_NULL_HANDLE) {
+        if (m_eyeTracker.eyeTrackerActionSet() != XR_NULL_HANDLE) {
             // Suggest the bindings for the eye tracker. We do this last in order to override previous bindings the
             // application may have done.
             XrActionSuggestedBinding binding;
-            binding.action = m_eyeTracker.m_eyeGazeAction;
+            binding.action = m_eyeTracker.eyeGazeAction();
 
             XrInteractionProfileSuggestedBinding suggestedBindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING,
                                                                    nullptr};
@@ -60,7 +60,7 @@ namespace openxr_api_layer {
             // Inject our actionset.
             actionSets.assign(chainAttachInfo.actionSets,
                               chainAttachInfo.actionSets + chainAttachInfo.countActionSets);
-            actionSets.push_back(m_eyeTracker.m_eyeTrackerActionSet);
+            actionSets.push_back(m_eyeTracker.eyeTrackerActionSet());
 
             chainAttachInfo.actionSets = actionSets.data();
             chainAttachInfo.countActionSets = static_cast<uint32_t>(actionSets.size());
@@ -74,15 +74,15 @@ namespace openxr_api_layer {
     }
 
     XrResult ActionManager::syncActions(XrSession session, const XrActionsSyncInfo* syncInfo) {
-        TraceLoggingWrite(g_traceProvider, "xrSyncActions", TLXArg(session, "Session"));
+        QVF_TRACE("xrSyncActions", TLXArg(session, "Session"));
 
         std::vector<XrActiveActionSet> activeActionSets;
         XrActionsSyncInfo chainSyncInfo = *syncInfo;
         // Inject our own actionset if needed.
-        if (m_eyeTracker.m_eyeTrackerActionSet != XR_NULL_HANDLE) {
+        if (m_eyeTracker.eyeTrackerActionSet() != XR_NULL_HANDLE) {
             activeActionSets.assign(chainSyncInfo.activeActionSets,
                                     chainSyncInfo.activeActionSets + chainSyncInfo.countActiveActionSets);
-            activeActionSets.push_back({m_eyeTracker.m_eyeTrackerActionSet, XR_NULL_PATH});
+            activeActionSets.push_back({m_eyeTracker.eyeTrackerActionSet(), XR_NULL_PATH});
 
             chainSyncInfo.activeActionSets = activeActionSets.data();
             chainSyncInfo.countActiveActionSets = (uint32_t)activeActionSets.size();
@@ -111,22 +111,22 @@ namespace openxr_api_layer {
         // xrPollEvent() here if needed.
         if (m_needPollEvent) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "xrBeginFrame_PollEvent");
+            QVF_TRACE_START(local, "xrBeginFrame_PollEvent");
             XrEventDataBuffer buf{XR_TYPE_EVENT_DATA_BUFFER};
             m_openXrApi->OpenXrApi::xrPollEvent(m_openXrApi->GetXrInstance(), &buf);
-            TraceLoggingWriteStop(local, "xrBeginFrame_PollEvent");
+            QVF_TRACE_STOP(local, "xrBeginFrame_PollEvent");
         }
 
         if (m_needAttachActionSets) {
             // This will clear the m_needAttachActionSets flag.
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "xrBeginFrame_AttachSessionActionSets");
+            QVF_TRACE_START(local, "xrBeginFrame_AttachSessionActionSets");
             XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
             const XrResult attachResult = attachSessionActionSets(session, &attachInfo);
             if (XR_FAILED(attachResult) && attachResult != XR_ERROR_ACTIONSETS_ALREADY_ATTACHED) {
                 LogWarning("xrBeginFrame: attachSessionActionSets failed: {}\n", xr::ToCString(attachResult));
             }
-            TraceLoggingWriteStop(local, "xrBeginFrame_AttachSessionActionSets");
+            QVF_TRACE_STOP(local, "xrBeginFrame_AttachSessionActionSets");
         }
 
         // If an application does not use motion controllers, it is not calling xrSyncActions().
@@ -134,14 +134,14 @@ namespace openxr_api_layer {
         if (m_needSyncActions) {
             XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
             XrActiveActionSet actionSet{};
-            actionSet.actionSet = m_eyeTracker.m_eyeTrackerActionSet;
+            actionSet.actionSet = m_eyeTracker.eyeTrackerActionSet();
             syncInfo.activeActionSets = &actionSet;
             syncInfo.countActiveActionSets = 1;
             {
                 TraceLocalActivity(local);
-                TraceLoggingWriteStart(local, "xrBeginFrame_SyncActions");
+                QVF_TRACE_START(local, "xrBeginFrame_SyncActions");
                 CHECK_XRCMD(m_openXrApi->OpenXrApi::xrSyncActions(session, &syncInfo));
-                TraceLoggingWriteStop(local, "xrBeginFrame_SyncActions");
+                QVF_TRACE_STOP(local, "xrBeginFrame_SyncActions");
             }
         }
     }

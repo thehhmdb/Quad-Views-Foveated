@@ -87,7 +87,7 @@ namespace {
               xrSuggestInteractionProfileBindings(xrSuggestInteractionProfileBindings_),
               m_forwardDispatch(forwardDispatch) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(
+            QVF_TRACE_START(
                 local, "InputFramework_Create", TLXArg(session, "Session"), TLArg((int)methods, "InputMethods"));
 
             CHECK_XRCMD(
@@ -127,12 +127,12 @@ namespace {
                 CHECK_XRCMD(xrCreateActionSpace(m_session, &actionSpaceInfo, &m_aimActionSpace[Hands::Right]));
             }
 
-            TraceLoggingWriteStop(local, "InputFramework_Create", TLPArg(this, "InputFramework"));
+            QVF_TRACE_STOP(local, "InputFramework_Create", TLPArg(this, "InputFramework"));
         }
 
         ~InputFramework() override {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFramework_Destroy", TLXArg(m_session, "Session"));
+            QVF_TRACE_START(local, "InputFramework_Destroy", TLXArg(m_session, "Session"));
 
             PFN_xrDestroySpace xrDestroySpace;
             if (XR_SUCCEEDED(xrGetInstanceProcAddr(
@@ -144,7 +144,7 @@ namespace {
                 }
             }
 
-            TraceLoggingWriteStop(local, "InputFramework_Destroy");
+            QVF_TRACE_STOP(local, "InputFramework_Destroy");
         }
 
         XrSession getSessionHandle() const override {
@@ -153,14 +153,14 @@ namespace {
 
         void setSessionData(std::unique_ptr<IInputSessionData> sessionData) override {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local,
-                                   "InputFramework_SetSessionData",
-                                   TLXArg(m_session, "Session"),
-                                   TLPArg(sessionData.get(), "SessionData"));
+            QVF_TRACE_START(local,
+                            "InputFramework_SetSessionData",
+                            TLXArg(m_session, "Session"),
+                            TLPArg(sessionData.get(), "SessionData"));
 
             m_sessionData = std::move(sessionData);
 
-            TraceLoggingWriteStop(local, "InputFramework_SetSessionData");
+            QVF_TRACE_STOP(local, "InputFramework_SetSessionData");
         }
 
         IInputSessionData* getSessionDataPtr() const override {
@@ -169,17 +169,17 @@ namespace {
 
         void blockApplicationInput(bool blocked) override {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(
+            QVF_TRACE_START(
                 local, "InputFramework_BlockApplicationInput", TLXArg(m_session, "Session"), TLArg(blocked, "Blocked"));
 
             m_blockApplicationInputs = blocked;
 
-            TraceLoggingWriteStop(local, "InputFramework_BlockApplicationInput");
+            QVF_TRACE_STOP(local, "InputFramework_BlockApplicationInput");
         }
 
         XrSpaceLocationFlags locateMotionController(uint32_t side, XrSpace baseSpace, XrPosef& pose) const {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(
+            QVF_TRACE_START(
                 local, "InputFramework_LocateMotionController", TLXArg(m_session, "Session"), TLArg(side, "Side"));
 
             if (side >= Hands::Count) {
@@ -209,7 +209,7 @@ namespace {
                 locationFlags = location.locationFlags;
             }
 
-            TraceLoggingWriteStop(
+            QVF_TRACE_STOP(
                 local, "InputFramework_LocateMotionController", TLArg(locationFlags, "LocationFlags"));
 
             return locationFlags;
@@ -225,11 +225,11 @@ namespace {
 
         bool getMotionControllerButtonState(uint32_t side, MotionControllerButton button) const {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local,
-                                   "InputFramework_GetMotionControllerButtonState",
-                                   TLXArg(m_session, "Session"),
-                                   TLArg(side, "Side"),
-                                   TLArg(xr::ToString(button).c_str(), "Button"));
+            QVF_TRACE_START(local,
+                            "InputFramework_GetMotionControllerButtonState",
+                            TLXArg(m_session, "Session"),
+                            TLArg(side, "Side"),
+                            TLArg(xr::ToString(button).c_str(), "Button"));
 
             if (side >= Hands::Count) {
                 throw std::runtime_error("Invalid hand");
@@ -269,20 +269,20 @@ namespace {
             XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
             CHECK_XRCMD(xrGetActionStateBoolean(m_session, &actionInfo, &state));
 
-            TraceLoggingWriteStop(local,
-                                  "InputFramework_GetMotionControllerButtonState",
-                                  TLArg(!!state.isActive, "IsActive"),
-                                  TLArg(!!state.currentState, "State"));
+            QVF_TRACE_STOP(local,
+                           "InputFramework_GetMotionControllerButtonState",
+                           TLArg(!!state.isActive, "IsActive"),
+                           TLArg(!!state.currentState, "State"));
 
             return state.isActive && state.currentState;
         }
 
         XrVector2f getMotionControllerThumbstickState(uint32_t side) const {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local,
-                                   "InputFramework_GetMotionControllerThumbstickState",
-                                   TLXArg(m_session, "Session"),
-                                   TLArg(side, "Side"));
+            QVF_TRACE_START(local,
+                            "InputFramework_GetMotionControllerThumbstickState",
+                            TLXArg(m_session, "Session"),
+                            TLArg(side, "Side"));
 
             if (side >= Hands::Count) {
                 throw std::runtime_error("Invalid hand");
@@ -304,7 +304,7 @@ namespace {
             XrActionStateVector2f state{XR_TYPE_ACTION_STATE_VECTOR2F};
             CHECK_XRCMD(xrGetActionStateVector2f(m_session, &actionInfo, &state));
 
-            TraceLoggingWriteStart(
+            QVF_TRACE_START(
                 local,
                 "InputFramework_GetMotionControllerThumbstickState",
                 TLArg(!!state.isActive, "IsActive"),
@@ -318,11 +318,11 @@ namespace {
 
         void pulseMotionControllerHaptics(uint32_t side, float strength) const {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local,
-                                   "InputFramework_PulseMotionControllerHaptics",
-                                   TLXArg(m_session, "Session"),
-                                   TLArg(side, "Side"),
-                                   TLArg(strength, "Strength"));
+            QVF_TRACE_START(local,
+                            "InputFramework_PulseMotionControllerHaptics",
+                            TLXArg(m_session, "Session"),
+                            TLArg(side, "Side"),
+                            TLArg(strength, "Strength"));
 
             if (side >= Hands::Count) {
                 throw std::runtime_error("Invalid hand");
@@ -351,7 +351,7 @@ namespace {
             CHECK_XRCMD(
                 xrApplyHapticFeedback(m_session, &hapticInfo, reinterpret_cast<XrHapticBaseHeader*>(&hapticVibration)));
 
-            TraceLoggingWriteStop(local, "InputFramework_PulseMotionControllerHaptics");
+            QVF_TRACE_STOP(local, "InputFramework_PulseMotionControllerHaptics");
         }
 
         void updateNeedPollEvent(bool needPollEvent) {
@@ -360,7 +360,7 @@ namespace {
 
         XrResult xrWaitFrame_subst(XrSession session, const XrFrameWaitInfo* frameWaitInfo, XrFrameState* frameState) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFramework_WaitFrame", TLXArg(session, "Session"));
+            QVF_TRACE_START(local, "InputFramework_WaitFrame", TLXArg(session, "Session"));
 
             const XrResult result = m_forwardDispatch.xrWaitFrame(session, frameWaitInfo, frameState);
             if (XR_SUCCEEDED(result)) {
@@ -369,29 +369,29 @@ namespace {
                 m_waitedFrameTime.push_back(frameState->predictedDisplayTime);
             }
 
-            TraceLoggingWriteStop(local,
-                                  "InputFramework_WaitFrame",
-                                  TLArg(xr::ToCString(result), "Result"),
-                                  TLArg(frameState->predictedDisplayTime, "PredictedDisplayTime"));
+            QVF_TRACE_STOP(local,
+                           "InputFramework_WaitFrame",
+                           TLArg(xr::ToCString(result), "Result"),
+                           TLArg(frameState->predictedDisplayTime, "PredictedDisplayTime"));
 
             return result;
         }
 
         XrResult xrBeginFrame_subst(XrSession session, const XrFrameBeginInfo* frameBeginInfo) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFramework_BeginFrame", TLXArg(session, "Session"));
+            QVF_TRACE_START(local, "InputFramework_BeginFrame", TLXArg(session, "Session"));
 
             const XrResult result = m_forwardDispatch.xrBeginFrame(session, frameBeginInfo);
             if (XR_SUCCEEDED(result)) {
                 std::unique_lock lock(m_frameMutex);
 
                 if (m_frameworkActions.actionSet != XR_NULL_HANDLE) {
-                    TraceLoggingWriteTagged(local,
-                                            "InputFramework_BeginFrame_State",
-                                            TLArg(m_wasActionSetsAttached, "WasActionSetsAttached"),
-                                            TLArg(m_needPollEvent, "NeedPollEvent"),
-                                            TLArg(m_frameworkActions.isOpenComposite, "IsOpenComposite"),
-                                            TLArg(m_isInteractionProfileValid, "IsInteractionProfileValid"));
+                    QVF_TRACE_TAGGED(local,
+                                     "InputFramework_BeginFrame_State",
+                                     TLArg(m_wasActionSetsAttached, "WasActionSetsAttached"),
+                                     TLArg(m_needPollEvent, "NeedPollEvent"),
+                                     TLArg(m_frameworkActions.isOpenComposite, "IsOpenComposite"),
+                                     TLArg(m_isInteractionProfileValid, "IsInteractionProfileValid"));
 
                     // If the application doesn't use motion controller at all, we need to attach our actionset
                     // ourselves...
@@ -400,7 +400,7 @@ namespace {
                     // initialization of its action system.
                     if (!m_wasActionSetsAttached &&
                         (!m_frameworkActions.isOpenComposite || m_isInteractionProfileValid)) {
-                        TraceLoggingWriteTagged(local, "InputFramework_BeginFrame_SetupFrameworkActionSet");
+                        QVF_TRACE_TAGGED(local, "InputFramework_BeginFrame_SetupFrameworkActionSet");
 
                         // Make sure our bindings are complete. We only submit suggestions for the interaction profiles
                         // in the core spec, and hope runtimes do the right thing for implicit remapping.
@@ -415,7 +415,7 @@ namespace {
                             CHECK_XRCMD(xrStringToPath(m_instance, interationProfile, &bindings.interactionProfile));
                             const XrResult suggestResult = xrSuggestInteractionProfileBindings(m_instance, &bindings);
                             if (XR_FAILED(suggestResult)) {
-                                TraceLoggingWriteTagged(
+                                QVF_TRACE_TAGGED(
                                     local,
                                     "InputFramework_BeginFrame_SuggestInteractionProfileBindings_Error",
                                     TLArg(xr::ToString(suggestResult).c_str(), "Result"));
@@ -428,9 +428,9 @@ namespace {
                         XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
                         const XrResult attachResult = xrAttachSessionActionSets_subst(session, &attachInfo);
                         if (XR_FAILED(attachResult)) {
-                            TraceLoggingWriteTagged(local,
-                                                    "InputFramework_BeginFrame_AttachSessionActionSets_Error",
-                                                    TLArg(xr::ToString(attachResult).c_str(), "Result"));
+                            QVF_TRACE_TAGGED(local,
+                                            "InputFramework_BeginFrame_AttachSessionActionSets_Error",
+                                            TLArg(xr::ToString(attachResult).c_str(), "Result"));
                             ErrorLog(fmt::format("Could not attach framework's actionset for session: {}\n",
                                                  xr::ToCString(attachResult)));
                         }
@@ -441,7 +441,7 @@ namespace {
                         // If the application does not poll for events, we need to do it ourselves to avoid the
                         // session remaining stuck in the non-focused state (which will make xrSyncActions() fail).
                         if (m_needPollEvent) {
-                            TraceLoggingWriteTagged(local, "InputFramework_BeginFrame_PollEvent");
+                            QVF_TRACE_TAGGED(local, "InputFramework_BeginFrame_PollEvent");
 
                             while (true) {
                                 XrEventDataBuffer buf{XR_TYPE_EVENT_DATA_BUFFER};
@@ -451,7 +451,7 @@ namespace {
                             }
                         }
 
-                        TraceLoggingWriteTagged(local, "InputFramework_BeginFrame_SyncFrameworkActions");
+                        QVF_TRACE_TAGGED(local, "InputFramework_BeginFrame_SyncFrameworkActions");
                         XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
                         XrActiveActionSet frameworkActionSet{m_frameworkActions.actionSet, XR_NULL_PATH};
                         syncInfo.activeActionSets = &frameworkActionSet;
@@ -464,10 +464,10 @@ namespace {
                         XrInteractionProfileState rightState{XR_TYPE_INTERACTION_PROFILE_STATE};
                         CHECK_XRCMD(
                             xrGetCurrentInteractionProfile(m_session, m_sidePath[xr::Side::Right], &rightState));
-                        TraceLoggingWriteTagged(local,
-                                                "InputFramework_BeginFrame_CurrentInteractionProfiles",
-                                                TLArg(getXrPath(leftState.interactionProfile).c_str(), "Left"),
-                                                TLArg(getXrPath(rightState.interactionProfile).c_str(), "Right"));
+                        QVF_TRACE_TAGGED(local,
+                                         "InputFramework_BeginFrame_CurrentInteractionProfiles",
+                                         TLArg(getXrPath(leftState.interactionProfile).c_str(), "Left"),
+                                         TLArg(getXrPath(rightState.interactionProfile).c_str(), "Right"));
 
                         m_isInteractionProfileValid = leftState.interactionProfile != XR_NULL_PATH ||
                                                       rightState.interactionProfile != XR_NULL_PATH;
@@ -479,14 +479,14 @@ namespace {
                 m_waitedFrameTime.pop_front();
             }
 
-            TraceLoggingWriteStop(local, "InputFramework_BeginFrame", TLArg(xr::ToCString(result), "Result"));
+            QVF_TRACE_STOP(local, "InputFramework_BeginFrame", TLArg(xr::ToCString(result), "Result"));
 
             return result;
         }
 
         XrResult xrAttachSessionActionSets_subst(XrSession session, const XrSessionActionSetsAttachInfo* attachInfo) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFramework_AttachSessionActionSets", TLXArg(session, "Session"));
+            QVF_TRACE_START(local, "InputFramework_AttachSessionActionSets", TLXArg(session, "Session"));
 
             if (attachInfo->type != XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO) {
                 return XR_ERROR_VALIDATION_FAILURE;
@@ -498,11 +498,11 @@ namespace {
             std::vector<XrActionSet> actionSets(chainAttachInfo.actionSets,
                                                 chainAttachInfo.actionSets + chainAttachInfo.countActionSets);
             if (m_frameworkActions.actionSet != XR_NULL_HANDLE) {
-                TraceLoggingWriteTagged(local,
-                                        "InputFramework_AttachSessionActionSets_Inject",
-                                        TLXArg(m_frameworkActions.actionSet, "ActionSet"),
-                                        TLArg(chainAttachInfo.countActionSets, "OldCount"),
-                                        TLArg(chainAttachInfo.countActionSets + 1, "NewCount"));
+                QVF_TRACE_TAGGED(local,
+                                 "InputFramework_AttachSessionActionSets_Inject",
+                                 TLXArg(m_frameworkActions.actionSet, "ActionSet"),
+                                 TLArg(chainAttachInfo.countActionSets, "OldCount"),
+                                 TLArg(chainAttachInfo.countActionSets + 1, "NewCount"));
                 actionSets.push_back(m_frameworkActions.actionSet);
             }
             chainAttachInfo.actionSets = actionSets.data();
@@ -513,7 +513,7 @@ namespace {
                 m_wasActionSetsAttached = true;
             }
 
-            TraceLoggingWriteStop(
+            QVF_TRACE_STOP(
                 local, "InputFramework_AttachSessionActionSets", TLArg(xr::ToCString(result), "Result"));
 
             return result;
@@ -521,7 +521,7 @@ namespace {
 
         XrResult xrSyncActions_subst(XrSession session, const XrActionsSyncInfo* syncInfo) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFramework_SyncActions", TLXArg(session, "Session"));
+            QVF_TRACE_START(local, "InputFramework_SyncActions", TLXArg(session, "Session"));
 
             if (syncInfo->type != XR_TYPE_ACTIONS_SYNC_INFO) {
                 return XR_ERROR_VALIDATION_FAILURE;
@@ -531,10 +531,10 @@ namespace {
             if (!m_blockApplicationInputs) {
                 result = m_forwardDispatch.xrSyncActions(session, syncInfo);
             } else {
-                TraceLoggingWriteTagged(local, "InputFramework_SyncActions_Block");
+                QVF_TRACE_TAGGED(local, "InputFramework_SyncActions_Block");
             }
 
-            TraceLoggingWriteStop(local, "InputFramework_SyncActions", TLArg(xr::ToCString(result), "Result"));
+            QVF_TRACE_STOP(local, "InputFramework_SyncActions", TLArg(xr::ToCString(result), "Result"));
 
             return result;
         }
@@ -590,7 +590,7 @@ namespace {
             : m_instanceInfo(instanceInfo), m_instance(instance), xrGetInstanceProcAddr(xrGetInstanceProcAddr_),
               m_methods(methods) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFrameworkFactory_Create", TLArg((int)methods, "InputMethods"));
+            QVF_TRACE_START(local, "InputFrameworkFactory_Create", TLArg((int)methods, "InputMethods"));
 
             {
                 std::unique_lock lock(factoryMutex);
@@ -629,8 +629,8 @@ namespace {
                     instance, "xrCreateAction", reinterpret_cast<PFN_xrVoidFunction*>(&xrCreateAction)));
 
                 XrActionSetCreateInfo actionSetInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
-                strcpy(actionSetInfo.actionSetName, "input_framework");
-                strcpy(actionSetInfo.localizedActionSetName, "Input Framework");
+                strcpy_s(actionSetInfo.actionSetName, "input_framework");
+                strcpy_s(actionSetInfo.localizedActionSetName, "Input Framework");
                 // TODO: Need to investigate whether this can work in all applications.
                 actionSetInfo.priority = 0;
                 CHECK_XRCMD(xrCreateActionSet(m_instance, &actionSetInfo, &m_frameworkActions.actionSet));
@@ -641,9 +641,9 @@ namespace {
 
                 if ((methods & InputMethod::MotionControllerSpatial) == InputMethod::MotionControllerSpatial) {
                     XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
-                    strcpy(actionInfo.actionName, "aim");
+                    strcpy_s(actionInfo.actionName, "aim");
                     actionInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
-                    strcpy(actionInfo.localizedActionName, "Aim");
+                    strcpy_s(actionInfo.localizedActionName, "Aim");
                     actionInfo.subactionPaths = subactionPaths;
                     actionInfo.countSubactionPaths = static_cast<uint32_t>(std::size(subactionPaths));
                     CHECK_XRCMD(
@@ -653,9 +653,9 @@ namespace {
                 if ((methods & InputMethod::MotionControllerButtons) == InputMethod::MotionControllerButtons) {
                     {
                         XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
-                        strcpy(actionInfo.actionName, "select");
+                        strcpy_s(actionInfo.actionName, "select");
                         actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
-                        strcpy(actionInfo.localizedActionName, "Select");
+                        strcpy_s(actionInfo.localizedActionName, "Select");
                         actionInfo.subactionPaths = subactionPaths;
                         actionInfo.countSubactionPaths = static_cast<uint32_t>(std::size(subactionPaths));
                         CHECK_XRCMD(xrCreateAction(
@@ -663,9 +663,9 @@ namespace {
                     }
                     {
                         XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
-                        strcpy(actionInfo.actionName, "menu");
+                        strcpy_s(actionInfo.actionName, "menu");
                         actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
-                        strcpy(actionInfo.localizedActionName, "Menu");
+                        strcpy_s(actionInfo.localizedActionName, "Menu");
                         actionInfo.subactionPaths = subactionPaths;
                         actionInfo.countSubactionPaths = static_cast<uint32_t>(std::size(subactionPaths));
                         CHECK_XRCMD(
@@ -673,9 +673,9 @@ namespace {
                     }
                     {
                         XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
-                        strcpy(actionInfo.actionName, "squeeze");
+                        strcpy_s(actionInfo.actionName, "squeeze");
                         actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
-                        strcpy(actionInfo.localizedActionName, "Squeeze");
+                        strcpy_s(actionInfo.localizedActionName, "Squeeze");
                         actionInfo.subactionPaths = subactionPaths;
                         actionInfo.countSubactionPaths = static_cast<uint32_t>(std::size(subactionPaths));
                         CHECK_XRCMD(xrCreateAction(
@@ -683,9 +683,9 @@ namespace {
                     }
                     {
                         XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
-                        strcpy(actionInfo.actionName, "thumbstick_click");
+                        strcpy_s(actionInfo.actionName, "thumbstick_click");
                         actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
-                        strcpy(actionInfo.localizedActionName, "Thumbstick Click");
+                        strcpy_s(actionInfo.localizedActionName, "Thumbstick Click");
                         actionInfo.subactionPaths = subactionPaths;
                         actionInfo.countSubactionPaths = static_cast<uint32_t>(std::size(subactionPaths));
                         CHECK_XRCMD(xrCreateAction(
@@ -693,9 +693,9 @@ namespace {
                     }
                     {
                         XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
-                        strcpy(actionInfo.actionName, "thumbstick_position");
+                        strcpy_s(actionInfo.actionName, "thumbstick_position");
                         actionInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
-                        strcpy(actionInfo.localizedActionName, "Thumbstick Position");
+                        strcpy_s(actionInfo.localizedActionName, "Thumbstick Position");
                         actionInfo.subactionPaths = subactionPaths;
                         actionInfo.countSubactionPaths = static_cast<uint32_t>(std::size(subactionPaths));
                         CHECK_XRCMD(xrCreateAction(
@@ -705,9 +705,9 @@ namespace {
 
                 if ((methods & InputMethod::MotionControllerHaptics) == InputMethod::MotionControllerHaptics) {
                     XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
-                    strcpy(actionInfo.actionName, "vibration");
+                    strcpy_s(actionInfo.actionName, "vibration");
                     actionInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
-                    strcpy(actionInfo.localizedActionName, "Vibration");
+                    strcpy_s(actionInfo.localizedActionName, "Vibration");
                     actionInfo.subactionPaths = subactionPaths;
                     actionInfo.countSubactionPaths = static_cast<uint32_t>(std::size(subactionPaths));
                     CHECK_XRCMD(
@@ -718,12 +718,12 @@ namespace {
             // xrCreateSession(), xrDestroySession() and xrSuggestInteractionProfileBindings() function pointers are
             // chained.
 
-            TraceLoggingWriteStop(local, "InputFrameworkFactory_Create", TLPArg(this, "InputFrameworkFactory"));
+            QVF_TRACE_STOP(local, "InputFrameworkFactory_Create", TLPArg(this, "InputFrameworkFactory"));
         }
 
         ~InputFrameworkFactory() override {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFrameworkFactory_Destroy");
+            QVF_TRACE_START(local, "InputFrameworkFactory_Destroy");
 
             PFN_xrDestroyAction xrDestroyAction;
             if (XR_SUCCEEDED(xrGetInstanceProcAddr(
@@ -766,7 +766,7 @@ namespace {
                 factory = nullptr;
             }
 
-            TraceLoggingWriteStop(local, "InputFrameworkFactory_Destroy");
+            QVF_TRACE_STOP(local, "InputFrameworkFactory_Destroy");
         }
 
         void xrGetInstanceProcAddr_post(XrInstance instance, const char* name, PFN_xrVoidFunction* function) override {
@@ -802,14 +802,14 @@ namespace {
 
         XrResult xrPollEvent_subst(XrInstance instance, XrEventDataBuffer* eventData) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFrameworkFactory_xrPollEvent");
+            QVF_TRACE_START(local, "InputFrameworkFactory_xrPollEvent");
 
             const XrResult result = xrPollEvent(instance, eventData);
             if (XR_SUCCEEDED(result)) {
                 m_needPollEvent = false;
             }
 
-            TraceLoggingWriteStop(local, "InputFrameworkFactory_xrPollEvent", TLArg(xr::ToCString(result), "Result"));
+            QVF_TRACE_STOP(local, "InputFrameworkFactory_xrPollEvent", TLArg(xr::ToCString(result), "Result"));
 
             return result;
         }
@@ -827,7 +827,7 @@ namespace {
 
         XrResult xrCreateSession_subst(XrInstance instance, const XrSessionCreateInfo* createInfo, XrSession* session) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFrameworkFactory_CreateSession");
+            QVF_TRACE_START(local, "InputFrameworkFactory_CreateSession");
 
             const XrResult result = xrCreateSession(instance, createInfo, session);
             if (XR_SUCCEEDED(result)) {
@@ -846,17 +846,17 @@ namespace {
                                                                m_methods)));
             }
 
-            TraceLoggingWriteStop(local,
-                                  "InputFrameworkFactory_CreateSession",
-                                  TLArg(xr::ToCString(result), "Result"),
-                                  TLXArg(*session, "Session"));
+            QVF_TRACE_STOP(local,
+                           "InputFrameworkFactory_CreateSession",
+                           TLArg(xr::ToCString(result), "Result"),
+                           TLXArg(*session, "Session"));
 
             return result;
         }
 
         XrResult xrDestroySession_subst(XrSession session) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFrameworkFactory_DestroySession", TLXArg(session, "Session"));
+            QVF_TRACE_START(local, "InputFrameworkFactory_DestroySession", TLXArg(session, "Session"));
 
             {
                 std::unique_lock lock(m_sessionsMutex);
@@ -868,7 +868,7 @@ namespace {
             }
             const XrResult result = xrDestroySession(session);
 
-            TraceLoggingWriteStop(
+            QVF_TRACE_STOP(
                 local, "InputFrameworkFactory_DestroySession", TLArg(xr::ToCString(result), "Result"));
 
             return result;
@@ -877,7 +877,7 @@ namespace {
         XrResult xrSuggestInteractionProfileBindings_subst(
             XrInstance instance, const XrInteractionProfileSuggestedBinding* suggestedBindings) {
             TraceLocalActivity(local);
-            TraceLoggingWriteStart(local, "InputFrameworkFactory_SuggestInteractionProfileBindings");
+            QVF_TRACE_START(local, "InputFrameworkFactory_SuggestInteractionProfileBindings");
 
             if (suggestedBindings->type != XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING) {
                 return XR_ERROR_VALIDATION_FAILURE;
@@ -890,9 +890,9 @@ namespace {
                                                                   chainSuggestedBindings.suggestedBindings +
                                                                       chainSuggestedBindings.countSuggestedBindings);
             const std::string& interationProfile = getXrPath(suggestedBindings->interactionProfile);
-            TraceLoggingWriteTagged(local,
-                                    "InputFrameworkFactory_SuggestInteractionProfileBindings",
-                                    TLArg(interationProfile.c_str(), "InteractionProfile"));
+            QVF_TRACE_TAGGED(local,
+                             "InputFrameworkFactory_SuggestInteractionProfileBindings",
+                             TLArg(interationProfile.c_str(), "InteractionProfile"));
             static struct InteractionProfileCapabilities {
                 const char* interactionProfile;
                 bool hasAimPose{false};
@@ -946,17 +946,17 @@ namespace {
                     CHECK_XRCMD(xrStringToPath(m_instance, ("/user/hand/right" + path).c_str(), &rightActionPath));
                 }
                 if (leftActionPath != XR_NULL_PATH) {
-                    TraceLoggingWriteTagged(local,
-                                            "InputFrameworkFactory_SuggestInteractionProfileBindings_Inject",
-                                            TLArg("Left", "Side"),
-                                            TLArg(path.c_str(), "ActionPath"));
+                    QVF_TRACE_TAGGED(local,
+                                     "InputFrameworkFactory_SuggestInteractionProfileBindings_Inject",
+                                     TLArg("Left", "Side"),
+                                     TLArg(path.c_str(), "ActionPath"));
                     updatedBindings.push_back({action, leftActionPath});
                 }
                 if (rightActionPath != XR_NULL_PATH) {
-                    TraceLoggingWriteTagged(local,
-                                            "InputFrameworkFactory_SuggestInteractionProfileBindings_Inject",
-                                            TLArg("Right", "Side"),
-                                            TLArg(path.c_str(), "ActionPath"));
+                    QVF_TRACE_TAGGED(local,
+                                     "InputFrameworkFactory_SuggestInteractionProfileBindings_Inject",
+                                     TLArg("Right", "Side"),
+                                     TLArg(path.c_str(), "ActionPath"));
                     updatedBindings.push_back({action, rightActionPath});
                 }
             };
@@ -988,9 +988,9 @@ namespace {
 
             const XrResult result = xrSuggestInteractionProfileBindings(instance, &chainSuggestedBindings);
 
-            TraceLoggingWriteStop(local,
-                                  "InputFrameworkFactory_SuggestInteractionProfileBindings",
-                                  TLArg(xr::ToCString(result), "Result"));
+            QVF_TRACE_STOP(local,
+                           "InputFrameworkFactory_SuggestInteractionProfileBindings",
+                           TLArg(xr::ToCString(result), "Result"));
 
             return result;
         }

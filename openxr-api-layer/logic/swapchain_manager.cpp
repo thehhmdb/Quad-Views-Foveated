@@ -32,8 +32,8 @@ namespace openxr_api_layer {
 
     void SwapchainManager::trackSwapchain(XrSwapchain handle, const XrSwapchainCreateInfo& createInfo) {
         std::unique_lock lock(m_mutex);
-        Swapchain newEntry{};
-        newEntry.createInfo = createInfo;
+        auto newEntry = std::make_shared<Swapchain>();
+        newEntry->createInfo = createInfo;
         m_swapchains.insert_or_assign(handle, std::move(newEntry));
     }
 
@@ -41,19 +41,32 @@ namespace openxr_api_layer {
         std::unique_lock lock(m_mutex);
         auto it = m_swapchains.find(handle);
         if (it != m_swapchains.end()) {
-            Swapchain& entry = it->second;
-            if (entry.fullFovSwapchain != XR_NULL_HANDLE) {
-                openXrApi->xrDestroySwapchain(entry.fullFovSwapchain);
+            std::shared_ptr<Swapchain> entry = it->second;
+            if (entry->fullFovSwapchain != XR_NULL_HANDLE) {
+                // FIX: Call the base class directly to avoid re-entering the layer's xrDestroySwapchain override.
+                // Otherwise, this creates a recursive lock on m_mutex and throws std::system_error.
+                openXrApi->OpenXrApi::xrDestroySwapchain(entry->fullFovSwapchain);
             }
             m_swapchains.erase(it);
         }
     }
 
-    SwapchainManager::Swapchain* SwapchainManager::getSwapchain(XrSwapchain handle) {
+    void SwapchainManager::destroyAllFullFovSwapchains(OpenXrApi* openXrApi) {
+        std::unique_lock lock(m_mutex);
+        for (auto& [handle, entry] : m_swapchains) {
+            if (entry->fullFovSwapchain != XR_NULL_HANDLE) {
+                // FIX: Call the base class directly to avoid recursive locking.
+                openXrApi->OpenXrApi::xrDestroySwapchain(entry->fullFovSwapchain);
+                entry->fullFovSwapchain = XR_NULL_HANDLE;
+            }
+        }
+    }
+
+    std::shared_ptr<SwapchainManager::Swapchain> SwapchainManager::getSwapchain(XrSwapchain handle) {
         std::unique_lock lock(m_mutex);
         auto it = m_swapchains.find(handle);
         if (it != m_swapchains.end()) {
-            return &it->second;
+            return it->second;
         }
         return nullptr;
     }
@@ -63,13 +76,12 @@ namespace openxr_api_layer {
             std::unique_lock lock(m_mutex);
             auto it = m_swapchains.find(handle);
             if (it != m_swapchains.end()) {
-                if (it->second.deferredRelease) {
+                if (it->second->deferredRelease) {
                     // Release the previous image before acquiring a new one.
-                    TraceLoggingWrite(g_traceProvider,
-                                      "xrAcquireSwapchainImage_DeferredSwapchainRelease",
-                                      TLXArg(handle, "Swapchain"));
+                    QVF_TRACE("xrAcquireSwapchainImage_DeferredSwapchainRelease",
+                              TLXArg(handle, "Swapchain"));
                     CHECK_XRCMD(openXrApi->xrReleaseSwapchainImage(handle, nullptr));
-                    it->second.deferredRelease = false;
+                    it->second->deferredRelease = false;
                 }
             }
         }
@@ -81,7 +93,7 @@ namespace openxr_api_layer {
             std::unique_lock lock(m_mutex);
             auto it = m_swapchains.find(handle);
             if (it != m_swapchains.end()) {
-                it->second.deferredRelease = true;
+                it->second->deferredRelease = true;
                 return true;
             }
         }
@@ -94,22 +106,12 @@ namespace openxr_api_layer {
         std::set<XrSwapchain> result;
         std::unique_lock lock(m_mutex);
         for (auto& [handle, entry] : m_swapchains) {
-            if (entry.deferredRelease) {
+            if (entry->deferredRelease) {
                 result.insert(handle);
-                entry.deferredRelease = false;
+                entry->deferredRelease = false;
             }
         }
         return result;
-    }
-
-    void SwapchainManager::destroyAllFullFovSwapchains(OpenXrApi* openXrApi) {
-        std::unique_lock lock(m_mutex);
-        for (auto& [handle, entry] : m_swapchains) {
-            if (entry.fullFovSwapchain != XR_NULL_HANDLE) {
-                openXrApi->xrDestroySwapchain(entry.fullFovSwapchain);
-                entry.fullFovSwapchain = XR_NULL_HANDLE;
-            }
-        }
     }
 
 } // namespace openxr_api_layer

@@ -49,11 +49,16 @@ namespace openxr_api_layer {
                                           bool useQuadViews,
                                           bool useFovTangent,
                                           bool requestedDepthSubmission,
-                                          uint32_t frameCount,
                                           std::vector<XrCompositionLayerProjection>& projectionAllocator,
                                           std::vector<std::array<XrCompositionLayerProjectionView, xr::StereoView::Count>>& projectionViewAllocator,
                                           std::vector<const XrCompositionLayerBaseHeader*>& outLayers,
                                           std::set<XrSwapchain>& outSwapchainsToRelease) {
+        // FIX (Item 5): If compositor previously failed, pass layers through unmodified
+        if (m_compositorFailed) {
+            outLayers.assign(frameEndInfo->layers, frameEndInfo->layers + frameEndInfo->layerCount);
+            return XR_SUCCESS;
+        }
+
         std::set<XrSwapchain> swapchainsToRelease;
 
         for (uint32_t i = 0; i < frameEndInfo->layerCount; i++) {
@@ -65,11 +70,10 @@ namespace openxr_api_layer {
                 const XrCompositionLayerProjection* proj =
                     reinterpret_cast<const XrCompositionLayerProjection*>(frameEndInfo->layers[i]);
 
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrEndFrame_Layer",
-                                  TLArg(xr::ToCString(proj->type), "Type"),
-                                  TLArg(proj->layerFlags, "Flags"),
-                                  TLXArg(proj->space, "Space"));
+                QVF_TRACE("xrEndFrame_Layer",
+                          TLArg(xr::ToCString(proj->type), "Type"),
+                          TLArg(proj->layerFlags, "Flags"),
+                          TLXArg(proj->space, "Space"));
 
                 if (proj->viewCount != (useQuadViews ? xr::QuadView::Count : xr::StereoView::Count)) {
                     return XR_ERROR_VALIDATION_FAILURE;
@@ -81,25 +85,24 @@ namespace openxr_api_layer {
                 for (uint32_t viewIndex = 0; viewIndex < xr::StereoView::Count; viewIndex++) {
                     if (useQuadViews) {
                         for (uint32_t j = viewIndex; j < xr::QuadView::Count; j += xr::StereoView::Count) {
-                            TraceLoggingWrite(
-                                g_traceProvider,
-                                "xrEndFrame_View",
-                                TLArg("Color", "Type"),
-                                TLArg(j, "ViewIndex"),
-                                TLXArg(proj->views[j].subImage.swapchain, "Swapchain"),
-                                TLArg(proj->views[j].subImage.imageArrayIndex, "ImageArrayIndex"),
-                                TLArg(xr::ToString(proj->views[j].subImage.imageRect).c_str(), "ImageRect"),
-                                TLArg(xr::ToString(proj->views[j].pose).c_str(), "Pose"),
-                                TLArg(xr::ToString(proj->views[j].fov).c_str(), "Fov"));
+                            QVF_TRACE("xrEndFrame_View",
+                                      TLArg("Color", "Type"),
+                                      TLArg(j, "ViewIndex"),
+                                      TLXArg(proj->views[j].subImage.swapchain, "Swapchain"),
+                                      TLArg(proj->views[j].subImage.imageArrayIndex, "ImageArrayIndex"),
+                                      TLArg(xr::ToString(proj->views[j].subImage.imageRect).c_str(), "ImageRect"),
+                                      TLArg(xr::ToString(proj->views[j].pose).c_str(), "Pose"),
+                                      TLArg(xr::ToString(proj->views[j].fov).c_str(), "Fov"));
                         }
                     }
 
                     const uint32_t focusViewIndex =
                         useQuadViews ? (viewIndex + xr::StereoView::Count) : viewIndex;
 
-                    SwapchainManager::Swapchain* swapchainForStereoView =
+                    // FIX (Item 8): Capture as shared_ptr to keep the Swapchain alive for this frame
+                    std::shared_ptr<SwapchainManager::Swapchain> swapchainForStereoView =
                         m_swapchainManager.getSwapchain(proj->views[viewIndex].subImage.swapchain);
-                    SwapchainManager::Swapchain* swapchainForFocusView =
+                    std::shared_ptr<SwapchainManager::Swapchain> swapchainForFocusView =
                         m_swapchainManager.getSwapchain(proj->views[focusViewIndex].subImage.swapchain);
                     if (!swapchainForStereoView || !swapchainForFocusView) {
                         return XR_ERROR_HANDLE_INVALID;
@@ -132,10 +135,9 @@ namespace openxr_api_layer {
                         LogDebug("xrEndFrame_CreateSwapchain: format={}, usageFlags=0x{:x}, arraySize={}, width={}x{}\n",
                                         createInfo.format, createInfo.usageFlags, createInfo.arraySize,
                                         createInfo.width, createInfo.height);
-                        TraceLoggingWrite(g_traceProvider,
-                                          "xrEndFrame_CreateSwapchain",
-                                          TLArg(m_viewManager.m_fullFovResolution.width, "Width"),
-                                          TLArg(m_viewManager.m_fullFovResolution.height, "Height"));
+                        QVF_TRACE("xrEndFrame_CreateSwapchain",
+                                  TLArg(m_viewManager.m_fullFovResolution.width, "Width"),
+                                  TLArg(m_viewManager.m_fullFovResolution.height, "Height"));
                         const XrResult swapchainResult = m_openXrApi->OpenXrApi::xrCreateSwapchain(
                             session, &createInfo, &swapchainForStereoView->fullFovSwapchain);
                         if (swapchainResult != XR_SUCCESS) {
@@ -159,8 +161,13 @@ namespace openxr_api_layer {
                                          focusView,
                                          *swapchainForFocusView,
                                          proj->layerFlags,
-                                         useQuadViews,
-                                         frameCount);
+                                         useQuadViews);
+
+                    // FIX (Item 5): If the compositor failed mid-frame, abort processing and fallback
+                    if (m_compositorFailed) {
+                        outLayers.assign(frameEndInfo->layers, frameEndInfo->layers + frameEndInfo->layerCount);
+                        return XR_SUCCESS;
+                    }
 
                     // Patch the view to reference the new swapchain at full FOV.
                     XrCompositionLayerProjectionView& patchedView =
@@ -179,20 +186,18 @@ namespace openxr_api_layer {
                                 const XrCompositionLayerDepthInfoKHR* depth =
                                     reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(entry);
 
-                                TraceLoggingWrite(
-                                    g_traceProvider,
-                                    "xrEndFrame_View",
-                                    TLArg("Depth", "Type"),
-                                    TLArg(viewIndex, "ViewIndex"),
-                                    TLXArg(depth->subImage.swapchain, "Swapchain"),
-                                    TLArg(depth->subImage.imageArrayIndex, "ImageArrayIndex"),
-                                    TLArg(xr::ToString(depth->subImage.imageRect).c_str(), "ImageRect"),
-                                    TLArg(depth->nearZ, "Near"),
-                                    TLArg(depth->farZ, "Far"),
-                                    TLArg(depth->minDepth, "MinDepth"),
-                                    TLArg(depth->maxDepth, "MaxDepth"));
+                                QVF_TRACE("xrEndFrame_View",
+                                          TLArg("Depth", "Type"),
+                                          TLArg(viewIndex, "ViewIndex"),
+                                          TLXArg(depth->subImage.swapchain, "Swapchain"),
+                                          TLArg(depth->subImage.imageArrayIndex, "ImageArrayIndex"),
+                                          TLArg(xr::ToString(depth->subImage.imageRect).c_str(), "ImageRect"),
+                                          TLArg(depth->nearZ, "Near"),
+                                          TLArg(depth->farZ, "Far"),
+                                          TLArg(depth->minDepth, "MinDepth"),
+                                          TLArg(depth->maxDepth, "MaxDepth"));
 
-                                SwapchainManager::Swapchain* swapchainForDepthInfo =
+                                std::shared_ptr<SwapchainManager::Swapchain> swapchainForDepthInfo =
                                     m_swapchainManager.getSwapchain(depth->subImage.swapchain);
                                 if (!swapchainForDepthInfo) {
                                     return XR_ERROR_HANDLE_INVALID;
@@ -226,7 +231,7 @@ namespace openxr_api_layer {
                         const XrCompositionLayerQuad* quad =
                             reinterpret_cast<const XrCompositionLayerQuad*>(frameEndInfo->layers[i]);
 
-                        SwapchainManager::Swapchain* swapchainEntry =
+                        std::shared_ptr<SwapchainManager::Swapchain> swapchainEntry =
                             m_swapchainManager.getSwapchain(quad->subImage.swapchain);
                         if (swapchainEntry && swapchainEntry->deferredRelease) {
                             swapchainsToRelease.insert(quad->subImage.swapchain);
@@ -238,9 +243,8 @@ namespace openxr_api_layer {
                     // the runtime does not support any other type of composition layers.
                 }
 
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrEndFrame_Layer",
-                                  TLArg(xr::ToCString(frameEndInfo->layers[i]->type), "Type"));
+                QVF_TRACE("xrEndFrame_Layer",
+                          TLArg(xr::ToCString(frameEndInfo->layers[i]->type), "Type"));
                 outLayers.push_back(frameEndInfo->layers[i]);
             }
         }
@@ -255,14 +259,36 @@ namespace openxr_api_layer {
                                               const XrCompositionLayerProjectionView& focusView,
                                               SwapchainManager::Swapchain& swapchainForFocusView,
                                               XrCompositionLayerFlags layerFlags,
-                                             bool useQuadViews,
-                                             uint32_t frameCount) {
+                                              bool useQuadViews) {
         // Lazy initialization of the compositor resources.
         if (!m_graphicsContext.getCompositor()->isInitialized()) {
             LogDebug("Initializing compositor resources (format={})\n",
                             swapchainForStereoView.createInfo.format);
-            m_graphicsContext.getCompositor()->initialize(static_cast<int32_t>(swapchainForStereoView.createInfo.format));
-            LogDebug("Compositor resources initialized\n");
+
+            try {
+                bool initSuccess = m_graphicsContext.getCompositor()->initialize(static_cast<int32_t>(swapchainForStereoView.createInfo.format));
+                if (!initSuccess) {
+                    throw std::runtime_error("Compositor initialize() returned false");
+                }
+                LogDebug("Compositor resources initialized\n");
+            } catch (const std::exception& e) {
+                LogError("Compositor initialization failed: {}\n", e.what());
+                m_compositorFailed = true;
+                return;
+            } catch (...) {
+                LogError("Compositor initialization failed with unknown exception\n");
+                m_compositorFailed = true;
+                return;
+            }
+        }
+
+        // Re-check isInitialized() as a safety net: if initialization threw and was caught
+        // upstream, the compositor will be in an uninitialized state. Skip composition to
+        // prevent null dereference crash.
+        if (!m_graphicsContext.getCompositor()->isInitialized()) {
+            LogError("Compositor initialization failed, skipping composition for this frame.\n");
+            m_compositorFailed = true;
+            return;
         }
 
         // Build compositor parameters
@@ -273,12 +299,13 @@ namespace openxr_api_layer {
         params.useQuadViews = useQuadViews;
         params.smoothenFocusViewEdges = m_config.m_smoothenFocusViewEdges;
         params.sharpenFocusView = m_config.m_sharpenFocusView;
-        params.chromaticAberrationCorrection = m_config.m_chromaticAberrationCorrection;
         params.debugFocusView = m_config.m_debugFocusView;
         params.debugEyeGaze = m_config.m_debugEyeGaze;
         params.eyeGaze = m_viewManager.m_eyeGaze[viewIndex];
         params.layerFlags = layerFlags;
-        params.frameCount = frameCount;
+        params.ditheringAmount = m_config.m_ditheringAmount;
+        static uint32_t s_frameCount = 0;
+        params.frameCount = s_frameCount++;
 
         // Build swapchain info
         SwapchainInfo stereoSwapchainInfo;
@@ -294,11 +321,16 @@ namespace openxr_api_layer {
         focusSwapchainInfo.lastReleasedIndex = swapchainForFocusView.lastReleasedIndex;
 
         // Delegate to compositor
-        m_graphicsContext.getCompositor()->compositeView(params,
+        void* result = m_graphicsContext.getCompositor()->compositeView(params,
                                      stereoSwapchainInfo,
                                      stereoView,
                                      focusSwapchainInfo,
                                      focusView);
+        if (!result) {
+            LogError("Compositor returned null destination — aborting composition.\n");
+            m_compositorFailed = true;
+            return;
+        }
     }
 
 } // namespace openxr_api_layer

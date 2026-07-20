@@ -24,7 +24,7 @@
 
 #include "pch.h"
 #include "framework/dispatch.gen.h"
-#include <map>
+#include <unordered_map>
 #include <mutex>
 
 namespace openxr_api_layer {
@@ -41,7 +41,7 @@ namespace openxr_api_layer {
       private:
         bool m_enabled{false};
         mutable std::mutex m_mutex;
-        std::map<XrTime, std::pair<XrFovf, XrFovf>> m_fovForDisplayTime;
+        std::unordered_map<XrTime, std::pair<XrFovf, XrFovf>> m_fovForDisplayTime;
     };
 
 } // namespace openxr_api_layer

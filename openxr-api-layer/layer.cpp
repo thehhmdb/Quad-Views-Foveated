@@ -27,7 +27,6 @@
 #include "layer.h"
 #include <log.h>
 #include <util.h>
-#include <utils/graphics.h>
 
 #include "views.h"
 #include "compositor.h"
@@ -48,6 +47,9 @@
 #include "logic/swapchain_interceptor.h"
 
 namespace openxr_api_layer {
+
+    // Define the global unloading flag (declared as extern in pch.h)
+    bool g_isUnloading = false;
 
     using namespace log;
     using namespace xr::math;
@@ -99,16 +101,15 @@ namespace openxr_api_layer {
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrGetInstanceProcAddr
         XrResult xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) override {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrGetInstanceProcAddr",
-                              TLXArg(instance, "Instance"),
-                              TLArg(name, "Name"),
-                              TLArg(m_ctx.bypassApiLayer, "Bypass"));
+            QVF_TRACE("xrGetInstanceProcAddr",
+                      TLXArg(instance, "Instance"),
+                      TLArg(name, "Name"),
+                      TLArg(m_ctx.bypassApiLayer, "Bypass"));
 
             XrResult result = m_ctx.bypassApiLayer ? m_xrGetInstanceProcAddr(instance, name, function)
                                                    : OpenXrApi::xrGetInstanceProcAddr(instance, name, function);
 
-            TraceLoggingWrite(g_traceProvider, "xrGetInstanceProcAddr", TLPArg(*function, "Function"));
+            QVF_TRACE("xrGetInstanceProcAddr", TLPArg(*function, "Function"));
 
             return result;
         }
@@ -123,14 +124,13 @@ namespace openxr_api_layer {
             OpenXrApi::xrCreateInstance(createInfo);
 
             // Dump the application name, OpenXR runtime information and other useful things for debugging.
-            TraceLoggingWrite(g_traceProvider,
-                              "xrCreateInstance",
-                              TLArg(xr::ToString(createInfo->applicationInfo.apiVersion).c_str(), "ApiVersion"),
-                              TLArg(createInfo->applicationInfo.applicationName, "ApplicationName"),
-                              TLArg(createInfo->applicationInfo.applicationVersion, "ApplicationVersion"),
-                              TLArg(createInfo->applicationInfo.engineName, "EngineName"),
-                              TLArg(createInfo->applicationInfo.engineVersion, "EngineVersion"),
-                              TLArg(createInfo->createFlags, "CreateFlags"));
+            QVF_TRACE("xrCreateInstance",
+                      TLArg(xr::ToString(createInfo->applicationInfo.apiVersion).c_str(), "ApiVersion"),
+                      TLArg(createInfo->applicationInfo.applicationName, "ApplicationName"),
+                      TLArg(createInfo->applicationInfo.applicationVersion, "ApplicationVersion"),
+                      TLArg(createInfo->applicationInfo.engineName, "EngineName"),
+                      TLArg(createInfo->applicationInfo.engineVersion, "EngineVersion"),
+                      TLArg(createInfo->createFlags, "CreateFlags"));
             {
                 char path[_MAX_PATH];
                 GetModuleFileNameA(nullptr, path, sizeof(path));
@@ -146,13 +146,12 @@ namespace openxr_api_layer {
                 "Application: {} ({})\n", createInfo->applicationInfo.applicationName, GetApplicationExecutableName());
 
             for (uint32_t i = 0; i < createInfo->enabledApiLayerCount; i++) {
-                TraceLoggingWrite(
-                    g_traceProvider, "xrCreateInstance", TLArg(createInfo->enabledApiLayerNames[i], "ApiLayerName"));
+                QVF_TRACE("xrCreateInstance", TLArg(createInfo->enabledApiLayerNames[i], "ApiLayerName"));
             }
 
             for (uint32_t i = 0; i < createInfo->enabledExtensionCount; i++) {
                 const std::string_view ext(createInfo->enabledExtensionNames[i]);
-                TraceLoggingWrite(g_traceProvider, "xrCreateInstance", TLArg(ext.data(), "ExtensionName"));
+                QVF_TRACE("xrCreateInstance", TLArg(ext.data(), "ExtensionName"));
                 if (ext == XR_VARJO_QUAD_VIEWS_EXTENSION_NAME) {
                     m_ctx.requestedQuadViews = true;
                 } else if (ext == XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME) {
@@ -185,14 +184,11 @@ namespace openxr_api_layer {
                                                  XR_VERSION_MAJOR(instanceProperties.runtimeVersion),
                                                  XR_VERSION_MINOR(instanceProperties.runtimeVersion),
                                                  XR_VERSION_PATCH(instanceProperties.runtimeVersion));
-            TraceLoggingWrite(g_traceProvider, "xrCreateInstance", TLArg(runtimeName.c_str(), "RuntimeName"));
+            QVF_TRACE("xrCreateInstance", TLArg(runtimeName.c_str(), "RuntimeName"));
             LogInformation("Using OpenXR runtime: {}\n", runtimeName);
 
             // Platform-specific quirks.
             m_swapchainManager.setDeferredReleaseQuirk(runtimeName.find("Varjo") != std::string::npos);
-
-            // Game-specific quirks.
-                    m_focusFovQuirk.setEnabled(GetApplicationName() == "DCS World" || GetApplicationName() == "DCS");
             return XR_SUCCESS;
         }
 
@@ -202,10 +198,9 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            TraceLoggingWrite(g_traceProvider,
-                              "xrGetSystem",
-                              TLXArg(instance, "Instance"),
-                              TLArg(xr::ToCString(getInfo->formFactor), "FormFactor"));
+            QVF_TRACE("xrGetSystem",
+                      TLXArg(instance, "Instance"),
+                      TLArg(xr::ToCString(getInfo->formFactor), "FormFactor"));
 
             const XrResult result = OpenXrApi::xrGetSystem(instance, getInfo, systemId);
 
@@ -220,12 +215,10 @@ namespace openxr_api_layer {
                     systemProperties.next = &eyeTrackingProperties;
                     CHECK_XRCMD(OpenXrApi::xrGetSystemProperties(instance, *systemId, &systemProperties));
                     m_ctx.systemName = systemProperties.systemName;
-                    TraceLoggingWrite(
-                        g_traceProvider,
-                        "xrGetSystem",
-                        TLArg(systemProperties.systemName, "SystemName"),
-                        TLArg(eyeGazeInteractionProperties.supportsEyeGazeInteraction, "SupportsEyeGazeInteraction"),
-                        TLArg(eyeTrackingProperties.supportsEyeTracking, "SupportsEyeTracking"));
+                    QVF_TRACE("xrGetSystem",
+                              TLArg(systemProperties.systemName, "SystemName"),
+                              TLArg(eyeGazeInteractionProperties.supportsEyeGazeInteraction, "SupportsEyeGazeInteraction"),
+                              TLArg(eyeTrackingProperties.supportsEyeTracking, "SupportsEyeTracking"));
                     LogInformation("Using OpenXR system: {}\n", systemProperties.systemName);
 
                     // Parse the configuration. Load the file shipped with the layer first, followed by the file the
@@ -236,7 +229,6 @@ namespace openxr_api_layer {
                     m_config.m_applicationExecutableName = GetApplicationExecutableName();
                     m_config.LoadConfiguration(dllHome / "settings.cfg");
                     m_config.LoadConfiguration(localAppData / "settings.cfg");
-
                     m_ctx.useFovTangent = m_config.m_fovTangentX != 1.f || m_config.m_fovTangentY != 1.f;
 
                     if (m_swapchainManager.getDeferredReleaseQuirk() && m_config.m_useTurboMode) {
@@ -244,28 +236,30 @@ namespace openxr_api_layer {
                         m_config.m_useTurboMode = false;
                     }
 
-                    TraceLoggingWrite(g_traceProvider,
-                                      "xrGetSystem",
-                                      TLArg(m_config.m_peripheralPixelDensity, "PeripheralResolutionFactor"),
-                                      TLArg(m_config.m_focusPixelDensity, "FocusResolutionFactor"),
-                                      TLArg(m_config.m_horizontalFovSection[0], "FixedHorizontalSection"),
-                                      TLArg(m_config.m_verticalFovSection[0], "FixedVerticalSection"),
-                                      TLArg(m_config.m_horizontalFovSection[1], "FoveatedHorizontalSection"),
-                                      TLArg(m_config.m_verticalFovSection[1], "FoveatedVerticalSection"),
-                                      TLArg(m_config.m_horizontalFixedOffset, "FixedHorizontalOffset"),
-                                      TLArg(m_config.m_verticalFixedOffset, "FixedVerticalOffset"),
-                                      TLArg(m_config.m_horizontalFocusOffset, "FoveatedHorizontalOffset"),
-                                      TLArg(m_config.m_verticalFocusOffset, "FoveatedVerticalOffset"),
-                                      TLArg(m_config.m_horizontalFocusWideningMultiplier, "HorizontalFocusWideningMultiplier"),
-                                      TLArg(m_config.m_verticalFocusWideningMultiplier, "VerticalFocusWideningMultiplier"),
-                                      TLArg(m_config.m_focusWideningDeadzone, "FocusWideningDeadzone"),
-                                      TLArg(m_config.m_preferFoveatedRendering, "PreferFoveatedRendering"),
-                                      TLArg(m_config.m_forceNoEyeTracking, "ForceNoEyeTracking"),
-                                      TLArg(m_config.m_smoothenFocusViewEdges, "SmoothenEdges"),
-                                      TLArg(m_config.m_sharpenFocusView, "SharpenFocusView"),
-                                      TLArg(m_config.m_fovTangentX, "FovTangentX"),
-                                      TLArg(m_config.m_fovTangentY, "FovTangentY"),
-                                      TLArg(m_config.m_useTurboMode, "TurboMode"));
+                    // Apply config-driven quirks
+                    m_focusFovQuirk.setEnabled(m_config.m_needFocusFovCorrectionQuirk);
+
+                    QVF_TRACE("xrGetSystem",
+                              TLArg(m_config.m_peripheralPixelDensity, "PeripheralResolutionFactor"),
+                              TLArg(m_config.m_focusPixelDensity, "FocusResolutionFactor"),
+                              TLArg(m_config.m_horizontalFovSection[0], "FixedHorizontalSection"),
+                              TLArg(m_config.m_verticalFovSection[0], "FixedVerticalSection"),
+                              TLArg(m_config.m_horizontalFovSection[1], "FoveatedHorizontalSection"),
+                              TLArg(m_config.m_verticalFovSection[1], "FoveatedVerticalSection"),
+                              TLArg(m_config.m_horizontalFixedOffset, "FixedHorizontalOffset"),
+                              TLArg(m_config.m_verticalFixedOffset, "FixedVerticalOffset"),
+                              TLArg(m_config.m_horizontalFocusOffset, "FoveatedHorizontalOffset"),
+                              TLArg(m_config.m_verticalFocusOffset, "FoveatedVerticalOffset"),
+                              TLArg(m_config.m_horizontalFocusWideningMultiplier, "HorizontalFocusWideningMultiplier"),
+                              TLArg(m_config.m_verticalFocusWideningMultiplier, "VerticalFocusWideningMultiplier"),
+                              TLArg(m_config.m_focusWideningDeadzone, "FocusWideningDeadzone"),
+                              TLArg(m_config.m_preferFoveatedRendering, "PreferFoveatedRendering"),
+                              TLArg(m_config.m_forceNoEyeTracking, "ForceNoEyeTracking"),
+                              TLArg(m_config.m_smoothenFocusViewEdges, "SmoothenEdges"),
+                              TLArg(m_config.m_sharpenFocusView, "SharpenFocusView"),
+                              TLArg(m_config.m_fovTangentX, "FovTangentX"),
+                              TLArg(m_config.m_fovTangentY, "FovTangentY"),
+                              TLArg(m_config.m_useTurboMode, "TurboMode"));
 
                     m_eyeTracker.setType(EyeTracker::Tracker::None);
                     if (m_ctx.requestedQuadViews) {
@@ -289,7 +283,7 @@ namespace openxr_api_layer {
                 m_ctx.systemId = *systemId;
             }
 
-            TraceLoggingWrite(g_traceProvider, "xrGetSystem", TLArg((int)*systemId, "SystemId"));
+            QVF_TRACE("xrGetSystem", TLArg((int)*systemId, "SystemId"));
 
             return result;
         }
@@ -298,10 +292,9 @@ namespace openxr_api_layer {
         XrResult xrGetSystemProperties(XrInstance instance,
                                        XrSystemId systemId,
                                        XrSystemProperties* properties) override {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrGetSystemProperties",
-                              TLXArg(instance, "Instance"),
-                              TLArg((int)systemId, "SystemId"));
+            QVF_TRACE("xrGetSystemProperties",
+                      TLXArg(instance, "Instance"),
+                      TLArg((int)systemId, "SystemId"));
 
             const XrResult result = OpenXrApi::xrGetSystemProperties(instance, systemId, properties);
 
@@ -314,10 +307,8 @@ namespace openxr_api_layer {
                             foveatedProperties->supportsFoveatedRendering =
                                 m_eyeTracker.getType() != EyeTracker::Tracker::None ? XR_TRUE : XR_FALSE;
 
-                            TraceLoggingWrite(
-                                g_traceProvider,
-                                "xrGetSystemProperties",
-                                TLArg(!!foveatedProperties->supportsFoveatedRendering, "SupportsFoveatedRendering"));
+                            QVF_TRACE("xrGetSystemProperties",
+                                      TLArg(!!foveatedProperties->supportsFoveatedRendering, "SupportsFoveatedRendering"));
                             break;
                         }
                         foveatedProperties =
@@ -335,11 +326,10 @@ namespace openxr_api_layer {
                                                uint32_t viewConfigurationTypeCapacityInput,
                                                uint32_t* viewConfigurationTypeCountOutput,
                                                XrViewConfigurationType* viewConfigurationTypes) override {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrEnumerateViewConfigurations",
-                              TLXArg(instance, "Instance"),
-                              TLArg((int)systemId, "SystemId"),
-                              TLArg(viewConfigurationTypeCapacityInput, "ViewConfigurationTypeCapacityInput"));
+            QVF_TRACE("xrEnumerateViewConfigurations",
+                      TLXArg(instance, "Instance"),
+                      TLArg((int)systemId, "SystemId"),
+                      TLArg(viewConfigurationTypeCapacityInput, "ViewConfigurationTypeCapacityInput"));
 
             XrResult result = XR_ERROR_RUNTIME_FAILURE;
             if (isSystemHandled(systemId) && m_ctx.requestedQuadViews && !m_config.m_unadvertiseQuadViews) {
@@ -370,15 +360,13 @@ namespace openxr_api_layer {
             }
 
             if (XR_SUCCEEDED(result)) {
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrEnumerateViewConfigurations",
-                                  TLArg(*viewConfigurationTypeCountOutput, "ViewConfigurationTypeCountOutput"));
+                QVF_TRACE("xrEnumerateViewConfigurations",
+                          TLArg(*viewConfigurationTypeCountOutput, "ViewConfigurationTypeCountOutput"));
 
                 if (viewConfigurationTypeCapacityInput && viewConfigurationTypes) {
                     for (uint32_t i = 0; i < *viewConfigurationTypeCountOutput; i++) {
-                        TraceLoggingWrite(g_traceProvider,
-                                          "xrEnumerateViewConfigurations",
-                                          TLArg(xr::ToCString(viewConfigurationTypes[i]), "ViewConfigurationType"));
+                        QVF_TRACE("xrEnumerateViewConfigurations",
+                                  TLArg(xr::ToCString(viewConfigurationTypes[i]), "ViewConfigurationType"));
                     }
                 }
             }
@@ -393,12 +381,11 @@ namespace openxr_api_layer {
                                                    uint32_t viewCapacityInput,
                                                    uint32_t* viewCountOutput,
                                                    XrViewConfigurationView* views) override {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrEnumerateViewConfigurationViews",
-                              TLXArg(instance, "Instance"),
-                              TLArg((int)systemId, "SystemId"),
-                              TLArg(viewCapacityInput, "ViewCapacityInput"),
-                              TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"));
+            QVF_TRACE("xrEnumerateViewConfigurationViews",
+                      TLXArg(instance, "Instance"),
+                      TLArg((int)systemId, "SystemId"),
+                      TLArg(viewCapacityInput, "ViewCapacityInput"),
+                      TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"));
 
             XrResult result = XR_ERROR_RUNTIME_FAILURE;
             if (isSystemHandled(systemId) &&
@@ -452,16 +439,14 @@ namespace openxr_api_layer {
             if (XR_SUCCEEDED(result)) {
                 if (viewCapacityInput && views) {
                     for (uint32_t i = 0; i < *viewCountOutput; i++) {
-                        TraceLoggingWrite(
-                            g_traceProvider,
-                            "xrEnumerateViewConfigurationViews",
-                            TLArg(i, "ViewIndex"),
-                            TLArg(views[i].maxImageRectWidth, "MaxImageRectWidth"),
-                            TLArg(views[i].maxImageRectHeight, "MaxImageRectHeight"),
-                            TLArg(views[i].maxSwapchainSampleCount, "MaxSwapchainSampleCount"),
-                            TLArg(views[i].recommendedImageRectWidth, "RecommendedImageRectWidth"),
-                            TLArg(views[i].recommendedImageRectHeight, "RecommendedImageRectHeight"),
-                            TLArg(views[i].recommendedSwapchainSampleCount, "RecommendedSwapchainSampleCount"));
+                        QVF_TRACE("xrEnumerateViewConfigurationViews",
+                                  TLArg(i, "ViewIndex"),
+                                  TLArg(views[i].maxImageRectWidth, "MaxImageRectWidth"),
+                                  TLArg(views[i].maxImageRectHeight, "MaxImageRectHeight"),
+                                  TLArg(views[i].maxSwapchainSampleCount, "MaxSwapchainSampleCount"),
+                                  TLArg(views[i].recommendedImageRectWidth, "RecommendedImageRectWidth"),
+                                  TLArg(views[i].recommendedImageRectHeight, "RecommendedImageRectHeight"),
+                                  TLArg(views[i].recommendedSwapchainSampleCount, "RecommendedSwapchainSampleCount"));
                     }
                 }
             }
@@ -476,12 +461,11 @@ namespace openxr_api_layer {
                                                   uint32_t environmentBlendModeCapacityInput,
                                                   uint32_t* environmentBlendModeCountOutput,
                                                   XrEnvironmentBlendMode* environmentBlendModes) override {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrEnumerateEnvironmentBlendModes",
-                              TLXArg(instance, "Instance"),
-                              TLArg((int)systemId, "SystemId"),
-                              TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"),
-                              TLArg(environmentBlendModeCapacityInput, "EnvironmentBlendModeCapacityInput"));
+            QVF_TRACE("xrEnumerateEnvironmentBlendModes",
+                      TLXArg(instance, "Instance"),
+                      TLArg((int)systemId, "SystemId"),
+                      TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"),
+                      TLArg(environmentBlendModeCapacityInput, "EnvironmentBlendModeCapacityInput"));
 
             // We will implement quad views on top of stereo.
             if (isSystemHandled(systemId) && m_ctx.requestedQuadViews &&
@@ -497,15 +481,13 @@ namespace openxr_api_layer {
                                                                                 environmentBlendModes);
 
             if (XR_SUCCEEDED(result)) {
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrEnumerateEnvironmentBlendModes",
-                                  TLArg(*environmentBlendModeCountOutput, "EnvironmentBlendModeCountOutput"));
+                QVF_TRACE("xrEnumerateEnvironmentBlendModes",
+                          TLArg(*environmentBlendModeCountOutput, "EnvironmentBlendModeCountOutput"));
 
                 if (environmentBlendModeCapacityInput && environmentBlendModes) {
                     for (uint32_t i = 0; i < *environmentBlendModeCountOutput; i++) {
-                        TraceLoggingWrite(g_traceProvider,
-                                          "xrEnumerateEnvironmentBlendModes",
-                                          TLArg(xr::ToCString(environmentBlendModes[i]), "EnvironmentBlendMode"));
+                        QVF_TRACE("xrEnumerateEnvironmentBlendModes",
+                                  TLArg(xr::ToCString(environmentBlendModes[i]), "EnvironmentBlendMode"));
                     }
                 }
             }
@@ -518,11 +500,10 @@ namespace openxr_api_layer {
                                                   XrSystemId systemId,
                                                   XrViewConfigurationType viewConfigurationType,
                                                   XrViewConfigurationProperties* configurationProperties) override {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrGetViewConfigurationProperties",
-                              TLXArg(instance, "Instance"),
-                              TLArg((int)systemId, "SystemId"),
-                              TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"));
+            QVF_TRACE("xrGetViewConfigurationProperties",
+                      TLXArg(instance, "Instance"),
+                      TLArg((int)systemId, "SystemId"),
+                      TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"));
 
             // We will implement quad views on top of stereo.
             const XrViewConfigurationType originalViewConfigurationType = viewConfigurationType;
@@ -539,11 +520,9 @@ namespace openxr_api_layer {
                     configurationProperties->viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO;
                 }
 
-                TraceLoggingWrite(
-                    g_traceProvider,
-                    "xrGetViewConfigurationProperties",
-                    TLArg(xr::ToCString(configurationProperties->viewConfigurationType), "ViewConfigurationType"),
-                    TLArg(!!configurationProperties->fovMutable, "FovMutable"));
+                QVF_TRACE("xrGetViewConfigurationProperties",
+                          TLArg(xr::ToCString(configurationProperties->viewConfigurationType), "ViewConfigurationType"),
+                          TLArg(!!configurationProperties->fovMutable, "FovMutable"));
             }
 
             return result;
@@ -557,16 +536,15 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            TraceLoggingWrite(g_traceProvider,
-                              "xrCreateSession",
-                              TLXArg(instance, "Instance"),
-                              TLArg((int)createInfo->systemId, "SystemId"),
-                              TLArg(createInfo->createFlags, "CreateFlags"));
+            QVF_TRACE("xrCreateSession",
+                      TLXArg(instance, "Instance"),
+                      TLArg((int)createInfo->systemId, "SystemId"),
+                      TLArg(createInfo->createFlags, "CreateFlags"));
 
             const XrResult result = OpenXrApi::xrCreateSession(instance, createInfo, session);
 
             if (XR_SUCCEEDED(result)) {
-                TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
+                QVF_TRACE("xrCreateSession", TLXArg(*session, "Session"));
 
                 if (isSystemHandled(createInfo->systemId)) {
                     // Initialize the minimal resources for the rendering code.
@@ -627,29 +605,36 @@ namespace openxr_api_layer {
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySession
         XrResult xrDestroySession(XrSession session) override {
-            TraceLoggingWrite(g_traceProvider, "xrDestroySession", TLXArg(session, "Session"));
+            QVF_TRACE("xrDestroySession", TLXArg(session, "Session"));
 
-            // Wait for deferred frames to finish before teardown.
             if (isSessionHandled(session)) {
+                // 1. Wait for deferred/turbo frames to finish before teardown.
                 m_framePipeline.destroy();
-            }
 
-            const XrResult result = OpenXrApi::xrDestroySession(session);
+                // 2. Hold the frame mutex while tearing down the compositor to prevent
+                // any lingering async work from touching graphics state.
+                std::unique_lock frameLock(m_framePipeline.getFrameMutex());
 
-            if (XR_SUCCEEDED(result)) {
-                if (isSessionHandled(session)) {
-                    // Hold the frame mutex while tearing down the compositor.
-                    std::unique_lock frameLock(m_framePipeline.getFrameMutex());
-
-                    // Destroy graphics context (compositor, timers, device contexts)
-                    m_graphicsContext.destroy();
-
-                    m_gazeSpaceManager.clear();
-                    // SwapchainManager cleans up fullFovSwapchains automatically
-
-                    m_ctx.session = XR_NULL_HANDLE;
+                // 3. Wait for GPU to finish all composition work before destroying swapchains.
+                if (m_graphicsContext.getCompositor()) {
+                    m_graphicsContext.getCompositor()->waitForGpuIdle();
                 }
+
+                // 4. Explicitly destroy all full-FOV swapchains created by the layer.
+                // This must happen BEFORE xrDestroySession, while the session is still valid.
+                m_swapchainManager.destroyAllFullFovSwapchains(this);
+
+                // 5. Destroy graphics context (which destroys the compositor).
+                m_graphicsContext.destroy();
+
+                // 6. Clear gaze spaces
+                m_gazeSpaceManager.clear();
+
+                m_ctx.session = XR_NULL_HANDLE;
             }
+
+            // 7. Now it is safe to destroy the OpenXR session.
+            const XrResult result = OpenXrApi::xrDestroySession(session);
 
             return result;
         }
@@ -661,11 +646,9 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            TraceLoggingWrite(
-                g_traceProvider,
-                "xrBeginSession",
-                TLXArg(session, "Session"),
-                TLArg(xr::ToCString(beginInfo->primaryViewConfigurationType), "PrimaryViewConfigurationType"));
+            QVF_TRACE("xrBeginSession",
+                      TLXArg(session, "Session"),
+                      TLArg(xr::ToCString(beginInfo->primaryViewConfigurationType), "PrimaryViewConfigurationType"));
 
             // We will implement quad views on top of stereo.
             XrSessionBeginInfo chainBeginInfo = *beginInfo;
@@ -713,9 +696,7 @@ namespace openxr_api_layer {
                         LogInformation("Turbo: {}\n", m_config.m_useTurboMode ? "Enabled" : "Disabled");
                     }
 
-                    m_eyeTracker.m_lastGoodEyeTrackingData = std::chrono::steady_clock::now();
-                    m_eyeTracker.m_lastGoodEyeGaze.reset();
-                    m_eyeTracker.m_loggedEyeTrackingWarning = false;
+                    m_eyeTracker.resetEyeTrackingHealth();
                     m_framePipeline.resetFrameCount();
                 }
             }
@@ -736,10 +717,9 @@ namespace openxr_api_layer {
                 return m_actionManager.attachSessionActionSets(session, attachInfo);
             }
 
-            TraceLoggingWrite(g_traceProvider, "xrAttachSessionActionSets", TLXArg(session, "Session"));
+            QVF_TRACE("xrAttachSessionActionSets", TLXArg(session, "Session"));
             for (uint32_t i = 0; i < attachInfo->countActionSets; i++) {
-                TraceLoggingWrite(
-                    g_traceProvider, "xrAttachSessionActionSets", TLXArg(attachInfo->actionSets[i], "ActionSet"));
+                QVF_TRACE("xrAttachSessionActionSets", TLXArg(attachInfo->actionSets[i], "ActionSet"));
             }
 
             return OpenXrApi::xrAttachSessionActionSets(session, attachInfo);
@@ -756,13 +736,12 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            TraceLoggingWrite(g_traceProvider,
-                              "xrLocateViews",
-                              TLXArg(session, "Session"),
-                              TLArg(xr::ToCString(viewLocateInfo->viewConfigurationType), "ViewConfigurationType"),
-                              TLArg(viewLocateInfo->displayTime, "DisplayTime"),
-                              TLXArg(viewLocateInfo->space, "Space"),
-                              TLArg(viewCapacityInput, "ViewCapacityInput"));
+            QVF_TRACE("xrLocateViews",
+                      TLXArg(session, "Session"),
+                      TLArg(xr::ToCString(viewLocateInfo->viewConfigurationType), "ViewConfigurationType"),
+                      TLArg(viewLocateInfo->displayTime, "DisplayTime"),
+                      TLXArg(viewLocateInfo->space, "Space"),
+                      TLArg(viewCapacityInput, "ViewCapacityInput"));
 
             XrResult result = XR_ERROR_RUNTIME_FAILURE;
             if (isSessionHandled(session)) {
@@ -831,9 +810,8 @@ namespace openxr_api_layer {
                                             foveatedLocate->next);
                                     }
 
-                                    TraceLoggingWrite(g_traceProvider,
-                                                      "xrLocateViews",
-                                                      TLArg(foveatedRenderingActive, "FoveatedRenderingActive"));
+                                    QVF_TRACE("xrLocateViews",
+                                              TLArg(foveatedRenderingActive, "FoveatedRenderingActive"));
                                 }
 
                                 // Query the eye tracker if needed.
@@ -873,15 +851,14 @@ namespace openxr_api_layer {
             }
 
             if (XR_SUCCEEDED(result)) {
-                TraceLoggingWrite(g_traceProvider, "xrLocateViews", TLArg(*viewCountOutput, "ViewCountOutput"));
+                QVF_TRACE("xrLocateViews", TLArg(*viewCountOutput, "ViewCountOutput"));
 
                 if (viewCapacityInput && views) {
                     for (uint32_t i = 0; i < *viewCountOutput; i++) {
-                        TraceLoggingWrite(g_traceProvider,
-                                          "xrLocateViews",
-                                          TLArg(i, "ViewIndex"),
-                                          TLArg(xr::ToString(views[i].pose).c_str(), "Pose"),
-                                          TLArg(xr::ToString(views[i].fov).c_str(), "Fov"));
+                        QVF_TRACE("xrLocateViews",
+                                  TLArg(i, "ViewIndex"),
+                                  TLArg(xr::ToString(views[i].pose).c_str(), "Pose"),
+                                  TLArg(xr::ToString(views[i].fov).c_str(), "Fov"));
                     }
                 }
             }
@@ -922,6 +899,7 @@ namespace openxr_api_layer {
                 XrResult result = m_framePipeline.waitFrame(this, session, frameWaitInfo, frameState,
                                                             m_config.m_useTurboMode, &m_isAsyncFrameMode);
                 m_framePipeline.setWaitedFrameTime(frameState->predictedDisplayTime);
+                m_eyeTracker.setPredictedDisplayPeriod(frameState->predictedDisplayPeriod);
                 return result;
             } else {
                 return OpenXrApi::xrWaitFrame(session, frameWaitInfo, frameState);
@@ -930,7 +908,7 @@ namespace openxr_api_layer {
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrBeginFrame
         XrResult xrBeginFrame(XrSession session, const XrFrameBeginInfo* frameBeginInfo) override {
-            TraceLoggingWrite(g_traceProvider, "xrBeginFrame", TLXArg(session, "Session"));
+            QVF_TRACE("xrBeginFrame", TLXArg(session, "Session"));
 
             if (isSessionHandled(session)) {
                 XrResult result = m_framePipeline.beginFrame(this, session, frameBeginInfo, m_isAsyncFrameMode);
@@ -941,11 +919,9 @@ namespace openxr_api_layer {
                                                         m_ctx.useQuadViews, m_eyeTracker.getType());
 
                     // Issue a warning if eye tracking was expected but does not seem functional.
-                    if (m_eyeTracker.getType() != EyeTracker::Tracker::None && !m_eyeTracker.m_loggedEyeTrackingWarning &&
-                        (std::chrono::steady_clock::now() - m_eyeTracker.m_lastGoodEyeTrackingData).count() > 60'000'000'000) {
+                    if (m_eyeTracker.consumeStaleTrackingWarning(std::chrono::seconds(60))) {
                         LogWarning("No data received from the eye tracker in 60 seconds! Image quality may be " 
                             "degraded.\n");
-                        m_eyeTracker.m_loggedEyeTrackingWarning = true;
                     }
                 }
 
@@ -961,15 +937,16 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            TraceLoggingWrite(g_traceProvider,
-                              "xrEndFrame",
-                              TLXArg(session, "Session"),
-                              TLArg(frameEndInfo->displayTime, "DisplayTime"),
-                              TLArg(xr::ToCString(frameEndInfo->environmentBlendMode), "EnvironmentBlendMode"));
+            QVF_TRACE("xrEndFrame",
+                      TLXArg(session, "Session"),
+                      TLArg(frameEndInfo->displayTime, "DisplayTime"),
+                      TLArg(xr::ToCString(frameEndInfo->environmentBlendMode), "EnvironmentBlendMode"));
 
             if (isSessionHandled(session)) {
                 LogDebug("xrEndFrame: layers={}, quadViews={}, d3d12={}\n", frameEndInfo->layerCount, m_ctx.useQuadViews, m_graphicsContext.isD3D12());
 
+                // Record frame timing
+                m_framePipeline.recordFrameTime();
                 m_debugKeyHandler.handle();
             }
 
@@ -991,7 +968,7 @@ namespace openxr_api_layer {
                     ComPtr<ID3DDeviceContextState> applicationContextState;
                     {
                         TraceLocalActivity(local);
-                        TraceLoggingWriteStart(local, "xrEndFrame_SwapDeviceContextState");
+                        QVF_TRACE_START(local, "xrEndFrame_SwapDeviceContextState");
                         if (m_graphicsContext.isD3D12()) {
                             // D3D12 uses command lists, no context swap needed
                             LogDebug("xrEndFrame: D3D12 path, skipping context swap\n");
@@ -1000,17 +977,17 @@ namespace openxr_api_layer {
                             m_graphicsContext.swapDeviceContextState(applicationContextState);
                             LogDebug("xrEndFrame: Context state swapped, clearing state...\n");
                         }
-                        TraceLoggingWriteStop(local, "xrEndFrame_SwapDeviceContextState");
+                        QVF_TRACE_STOP(local, "xrEndFrame_SwapDeviceContextState");
                     }
 
                     // Restore the application context state upon leaving this scope.
                     auto scopeGuard = MakeScopeGuard([&] {
                         TraceLocalActivity(local);
-                        TraceLoggingWriteStart(local, "xrEndFrame_SwapDeviceContextState");
+                        QVF_TRACE_START(local, "xrEndFrame_SwapDeviceContextState");
                         if (!m_graphicsContext.isD3D12()) {
                             m_graphicsContext.restoreDeviceContextState(applicationContextState);
                         }
-                        TraceLoggingWriteStop(local, "xrEndFrame_SwapDeviceContextState");
+                        QVF_TRACE_STOP(local, "xrEndFrame_SwapDeviceContextState");
                     });
 
                     // Delegate layer processing to LayerComposer.
@@ -1020,17 +997,13 @@ namespace openxr_api_layer {
                                                                            m_ctx.useQuadViews,
                                                                            m_ctx.useFovTangent,
                                                                            m_ctx.requestedDepthSubmission,
-                                                                           static_cast<uint32_t>(m_framePipeline.getFramesElapsed()),
                                                                            projectionAllocator,
                                                                            projectionViewAllocator,
                                                                            layers,
                                                                            swapchainsToRelease);
                     if (XR_FAILED(composeResult)) {
-                        LogWarning("xrEndFrame: processLayers failed with {}\n", xr::ToCString(composeResult));
                         return composeResult;
                     }
-
-                    LogDebug("xrEndFrame: processLayers succeeded, layers={}, quadViews={}\n", layers.size(), m_ctx.useQuadViews);
 
                     chainFrameEndInfo.layers = layers.data();
                     chainFrameEndInfo.layerCount = (uint32_t)layers.size();
@@ -1042,8 +1015,7 @@ namespace openxr_api_layer {
 
                     // Perform deferred swapchains release now.
                     for (auto swapchain : swapchainsToRelease) {
-                        TraceLoggingWrite(
-                            g_traceProvider, "xrEndFrame_DeferredSwapchainRelease", TLXArg(swapchain, "Swapchain"));
+                        QVF_TRACE("xrEndFrame_DeferredSwapchainRelease", TLXArg(swapchain, "Swapchain"));
 
                         CHECK_XRCMD(OpenXrApi::xrReleaseSwapchainImage(swapchain, nullptr));
                     }
@@ -1053,10 +1025,6 @@ namespace openxr_api_layer {
                     bool isAsyncMode = false;
                     result = m_framePipeline.endFrame(this, session, &chainFrameEndInfo,
                                                      m_config.m_useTurboMode, &isAsyncMode);
-                }
-
-                if (XR_FAILED(result)) {
-                    LogWarning("xrEndFrame: endFrame failed with {}\n", xr::ToCString(result));
                 }
 
                 m_framePipeline.incrementFrame();
@@ -1100,13 +1068,11 @@ namespace openxr_api_layer {
                 return m_actionManager.syncActions(session, syncInfo);
             }
 
-            TraceLoggingWrite(g_traceProvider, "xrSyncActions", TLXArg(session, "Session"));
+            QVF_TRACE("xrSyncActions", TLXArg(session, "Session"));
             for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
-                TraceLoggingWrite(
-                    g_traceProvider,
-                    "xrSyncActions",
-                    TLXArg(syncInfo->activeActionSets[i].actionSet, "ActionSet"),
-                    TLArg(syncInfo->activeActionSets[i].subactionPath, "SubactionPath"));
+                QVF_TRACE("xrSyncActions",
+                          TLXArg(syncInfo->activeActionSets[i].actionSet, "ActionSet"),
+                          TLArg(syncInfo->activeActionSets[i].subactionPath, "SubactionPath"));
             }
 
             return OpenXrApi::xrSyncActions(session, syncInfo);
@@ -1114,12 +1080,12 @@ namespace openxr_api_layer {
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrPollEvent
         XrResult xrPollEvent(XrInstance instance, XrEventDataBuffer* eventData) override {
-            TraceLoggingWrite(g_traceProvider, "xrPollEvent", TLXArg(instance, "Instance"));
+            QVF_TRACE("xrPollEvent", TLXArg(instance, "Instance"));
 
             const XrResult result = OpenXrApi::xrPollEvent(instance, eventData);
 
             if (result == XR_SUCCESS) {
-                TraceLoggingWrite(g_traceProvider, "xrPollEvent", TLArg(xr::ToCString(eventData->type), "EventType"));
+                QVF_TRACE("xrPollEvent", TLArg(xr::ToCString(eventData->type), "EventType"));
 
                 // Translate visibility mask events.
                 if (eventData->type == XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR) {
@@ -1150,14 +1116,13 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            TraceLoggingWrite(g_traceProvider,
-                              "xrGetVisibilityMaskKHR",
-                              TLXArg(session, "Session"),
-                              TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"),
-                              TLArg(viewIndex, "ViewIndex"),
-                              TLArg(xr::ToCString(visibilityMaskType), "VisibilityMaskType"),
-                              TLArg(visibilityMask->vertexCapacityInput, "VertexCapacityInput"),
-                              TLArg(visibilityMask->indexCapacityInput, "IndexCapacityInput"));
+            QVF_TRACE("xrGetVisibilityMaskKHR",
+                      TLXArg(session, "Session"),
+                      TLArg(xr::ToCString(viewConfigurationType), "ViewConfigurationType"),
+                      TLArg(viewIndex, "ViewIndex"),
+                      TLArg(xr::ToCString(visibilityMaskType), "VisibilityMaskType"),
+                      TLArg(visibilityMask->vertexCapacityInput, "VertexCapacityInput"),
+                      TLArg(visibilityMask->indexCapacityInput, "IndexCapacityInput"));
 
             XrResult result = XR_ERROR_RUNTIME_FAILURE;
             if (isSessionHandled(session)) {
@@ -1264,6 +1229,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         break;
 
     case DLL_PROCESS_DETACH:
+        // Set the flag BEFORE static destructors run so they can skip GPU sync
+        openxr_api_layer::g_isUnloading = true;
         TraceLoggingUnregister(openxr_api_layer::log::g_traceProvider);
         break;
 

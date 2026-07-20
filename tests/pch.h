@@ -22,6 +22,13 @@
 
 #pragma once
 
+// Global flag to indicate the DLL is being unloaded.
+// Used to skip dangerous GPU synchronization during process teardown.
+// Mirrors the declaration in the layer's pch.h so the test build can see it.
+namespace openxr_api_layer {
+    extern bool g_isUnloading;
+} // namespace openxr_api_layer
+
 // Uncomment below the graphics frameworks used by the layer.
 
 #define XR_USE_GRAPHICS_API_D3D11
@@ -74,9 +81,6 @@ using Microsoft::WRL::ComPtr;
 #include <d3dx12.h>
 #include <d3d12shader.h>
 #endif
-
-// DirectXMath (needed by eye_tracker.cpp for XMVector3NormalizeEst)
-#include <DirectXMath.h>
 
 // OpenXR + Windows-specific definitions.
 #define XR_NO_PROTOTYPES

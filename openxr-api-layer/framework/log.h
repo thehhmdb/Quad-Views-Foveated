@@ -28,9 +28,13 @@ namespace openxr_api_layer::log {
 
     TRACELOGGING_DECLARE_PROVIDER(g_traceProvider);
 
-    extern TraceLoggingActivity<g_traceProvider> g_traceGlobal;
+    extern TraceLoggingActivity<g_traceProvider> g_traceActivity;
 
-#define IsTraceEnabled() TraceLoggingProviderEnabled(g_traceProvider, 0, 0)
+    // Check if the ETW trace provider is active (i.e., a trace session is attached).
+    // Safe to call even if TraceLoggingRegister hasn't been called (returns false).
+    inline bool IsTraceEnabled() {
+        return TraceLoggingProviderEnabled(g_traceProvider, 0, 0);
+    }
 
 #define TraceLocalActivity(activity) TraceLoggingActivity<g_traceProvider> activity;
 
@@ -128,3 +132,36 @@ namespace openxr_api_layer::log {
     }
 
 } // namespace openxr_api_layer::log
+
+// Safe trace macros: These prevent argument evaluation and ETW API calls
+// when no trace session is active. This is critical for unit testing and
+// production performance. TraceLoggingProviderEnabled is safe to call even
+// if TraceLoggingRegister hasn't been called (returns false in that case).
+
+#define QVF_TRACE(event_name, ...) \
+    do { \
+        if (::openxr_api_layer::log::IsTraceEnabled()) { \
+            TraceLoggingWrite(::openxr_api_layer::log::g_traceProvider, event_name, __VA_ARGS__); \
+        } \
+    } while (0)
+
+#define QVF_TRACE_START(activity, event_name, ...) \
+    do { \
+        if (::openxr_api_layer::log::IsTraceEnabled()) { \
+            TraceLoggingWriteStart(activity, event_name, __VA_ARGS__); \
+        } \
+    } while (0)
+
+#define QVF_TRACE_STOP(activity, event_name, ...) \
+    do { \
+        if (::openxr_api_layer::log::IsTraceEnabled()) { \
+            TraceLoggingWriteStop(activity, event_name, __VA_ARGS__); \
+        } \
+    } while (0)
+
+#define QVF_TRACE_TAGGED(activity, event_name, ...) \
+    do { \
+        if (::openxr_api_layer::log::IsTraceEnabled()) { \
+            TraceLoggingWriteTagged(activity, event_name, __VA_ARGS__); \
+        } \
+    } while (0)

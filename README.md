@@ -20,6 +20,41 @@ More information on the [the wiki](https://github.com/mbucchia/Quad-Views-Foveat
 
 For troubleshooting, the log file can be found at `%LocalAppData%\Quad-Views-Foveated\Quad-Views-Foveated.log`.
 
+## Building and Running Tests
+
+This project includes an automated test suite (Google Test) covering ViewManager math, FramePipeline state management, and EyeTracker cache behavior.
+
+### Prerequisites
+
+- Visual Studio 2022 (v18) with MSBuild
+- C++ desktop development workload
+
+### Build
+
+From a **Git Bash** shell, use `MSYS_NO_PATHCONV=1` to prevent path conversion issues:
+
+```bash
+MSYS_NO_PATHCONV=1 "C:/Program Files/Microsoft Visual Studio/18/Community/MSBuild/Current/Bin/MSBuild.exe" XR_APILAYER_MBUCCHIA_quad_views_foveated.sln /p:Configuration=Release /p:Platform=x64 /t:QuadViewsFoveatedTests /m
+```
+
+### Run
+
+```bash
+./x64/Release/QuadViewsFoveatedTests.exe
+```
+
+For verbose output:
+
+```bash
+./x64/Release/QuadViewsFoveatedTests.exe --gtest_brief=0 --gtest_print_time=1
+```
+
+To run a specific test suite:
+
+```bash
+./x64/Release/QuadViewsFoveatedTests.exe --gtest_filter="ViewMathTest.*"
+```
+
 ## Donate
 
 Donations are welcome and totally optional. Please use [my GitHub sponsorship page](https://github.com/sponsors/mbucchia) to make one-time or recurring donations!

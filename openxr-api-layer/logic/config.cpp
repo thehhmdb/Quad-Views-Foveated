@@ -67,9 +67,17 @@ namespace openxr_api_layer {
                     return active;
                 }
                 if (line.size() >= 6 && line.substr(1, 4) == "app:") {
-                    return applicationName.find(line.substr(5, line.size() - 6)) != std::string::npos;
+                    const std::string pattern = line.substr(5, line.size() - 6);
+                    if (pattern.size() >= 6 && pattern.substr(0, 6) == "exact:") {
+                        return applicationName == pattern.substr(6);
+                    }
+                    return applicationName.find(pattern) != std::string::npos;
                 } else if (line.size() >= 6 && line.substr(1, 4) == "exe:") {
-                    return applicationExecutableName.find(line.substr(5, line.size() - 6)) != std::string::npos;
+                    const std::string pattern = line.substr(5, line.size() - 6);
+                    if (pattern.size() >= 6 && pattern.substr(0, 6) == "exact:") {
+                        return applicationExecutableName == pattern.substr(6);
+                    }
+                    return applicationExecutableName.find(pattern) != std::string::npos;
                 } else {
                     return m_runtimeName.find(line.substr(1, line.size() - 2)) != std::string::npos ||
                            m_systemName.find(line.substr(1, line.size() - 2)) != std::string::npos;
@@ -169,9 +177,6 @@ namespace openxr_api_layer {
                 } else if (name == "sharpen_focus_view") {
                     m_sharpenFocusView = std::clamp(std::stof(value), 0.f, 1.f);
                     parsed = true;
-                } else if (name == "chromatic_aberration_correction") {
-                    m_chromaticAberrationCorrection = std::clamp(std::stof(value), 0.f, 0.01f);
-                    parsed = true;
                 } else if (name == "fov_tangent_x") {
                     m_fovTangentX = std::clamp(std::stof(value), 0.1f, 1.f);
                     parsed = true;
@@ -203,10 +208,13 @@ namespace openxr_api_layer {
                     m_eyeGazeCacheTimeoutMs = std::stoul(value);
                     parsed = true;
                 } else if (name == "eye_tracking_min_cutoff") {
-                    m_eyeTrackingMinCutoff = std::stof(value);
+                    m_eyeTrackingMinCutoff = std::clamp(std::stof(value), 0.001f, 10.0f);
                     parsed = true;
                 } else if (name == "eye_tracking_beta") {
-                    m_eyeTrackingBeta = std::stof(value);
+                    m_eyeTrackingBeta = std::clamp(std::stof(value), 0.0f, 10.0f);
+                    parsed = true;
+                } else if (name == "dithering_amount") {
+                    m_ditheringAmount = std::clamp(std::stof(value), 0.f, 0.1f);
                     parsed = true;
                 } else if (name == "log_level") {
                     if (!log::ParseLogLevel(value.c_str())) {
